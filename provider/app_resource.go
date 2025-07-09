@@ -12,6 +12,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework-validators/mapvalidator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/setvalidator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
+	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -39,7 +40,7 @@ type appResource struct {
 
 type appResourceModel struct {
 	AppName       types.String                 `tfsdk:"app_name"`
-	Config        map[string]types.String      `tfsdk:"config"`
+	Config        types.Map                    `tfsdk:"config"`
 	Storage       map[string]storageModel      `tfsdk:"storage"`
 	Checks        *checkModel                  `tfsdk:"checks"`
 	Ports         map[string]portModel         `tfsdk:"ports"`
@@ -403,9 +404,19 @@ func (r *appResource) Read(ctx context.Context, req resource.ReadRequest, resp *
 		resp.Diagnostics.AddAttributeError(path.Root("config"), "Unable to get config", "Unable to get config. "+err.Error())
 	} else {
 		cfg := make(map[string]basetypes.StringValue)
+
+		// Get existing config keys from state to filter
+		var existingKeys []string
+		if !state.Config.IsNull() && !state.Config.IsUnknown() {
+			configElements := state.Config.Elements()
+			for k := range configElements {
+				existingKeys = append(existingKeys, k)
+			}
+		}
+
 		for k, v := range config {
 			found := false
-			for knownK := range state.Config {
+			for _, knownK := range existingKeys {
 				if k == knownK {
 					found = true
 					break
@@ -416,10 +427,18 @@ func (r *appResource) Read(ctx context.Context, req resource.ReadRequest, resp *
 				cfg[k] = basetypes.NewStringValue(v)
 			}
 		}
+
 		if len(cfg) == 0 {
-			state.Config = nil
+			state.Config = basetypes.NewMapNull(types.StringType)
 		} else {
-			state.Config = cfg
+			// Convert to map[string]attr.Value for basetypes.NewMapValue
+			attrMap := make(map[string]attr.Value)
+			for k, v := range cfg {
+				attrMap[k] = v
+			}
+			mapVal, diags := basetypes.NewMapValue(types.StringType, attrMap)
+			resp.Diagnostics.Append(diags...)
+			state.Config = mapVal
 		}
 	}
 
@@ -589,10 +608,13 @@ func (r *appResource) Create(ctx context.Context, req resource.CreateRequest, re
 		return
 	}
 
-	if len(plan.Config) != 0 {
+	if !plan.Config.IsNull() && !plan.Config.IsUnknown() {
 		config := make(map[string]string)
-		for k, v := range plan.Config {
-			config[k] = v.ValueString()
+		configElements := plan.Config.Elements()
+		for k, v := range configElements {
+			if stringVal, ok := v.(basetypes.StringValue); ok {
+				config[k] = stringVal.ValueString()
+			}
 		}
 		err := r.client.ConfigSet(ctx, plan.AppName.ValueString(), config)
 		if err != nil {
@@ -753,9 +775,32 @@ func (r *appResource) Update(ctx context.Context, req resource.UpdateRequest, re
 
 	// -- config
 	var namesToUnset []string
-	for stateName := range state.Config {
+	var stateConfigElements, planConfigElements map[string]basetypes.StringValue
+
+	// Get state config elements
+	if !state.Config.IsNull() && !state.Config.IsUnknown() {
+		stateConfigElements = make(map[string]basetypes.StringValue)
+		for k, v := range state.Config.Elements() {
+			if stringVal, ok := v.(basetypes.StringValue); ok {
+				stateConfigElements[k] = stringVal
+			}
+		}
+	}
+
+	// Get plan config elements
+	if !plan.Config.IsNull() && !plan.Config.IsUnknown() {
+		planConfigElements = make(map[string]basetypes.StringValue)
+		for k, v := range plan.Config.Elements() {
+			if stringVal, ok := v.(basetypes.StringValue); ok {
+				planConfigElements[k] = stringVal
+			}
+		}
+	}
+
+	// Find keys to unset (in state but not in plan)
+	for stateName := range stateConfigElements {
 		found := false
-		for planName := range plan.Config {
+		for planName := range planConfigElements {
 			if planName == stateName {
 				found = true
 				break
@@ -773,9 +818,11 @@ func (r *appResource) Update(ctx context.Context, req resource.UpdateRequest, re
 		restartRequired = true
 	}
 
+	// Find keys to set (new or changed values)
 	configToSet := make(map[string]string)
-	for k, v := range plan.Config {
-		if !state.Config[k].Equal(v) {
+	for k, v := range planConfigElements {
+		stateVal, exists := stateConfigElements[k]
+		if !exists || !stateVal.Equal(v) {
 			configToSet[k] = v.ValueString()
 		}
 	}
