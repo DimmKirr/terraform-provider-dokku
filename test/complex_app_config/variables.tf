@@ -37,6 +37,14 @@ variable "app_config" {
 
 variable "docker_image" {
   description = "Docker image to run"
-  default = "jmalloc/echoserver"
   type = string
+  default = "jmalloc/echo-server"
+}
+
+variable "extra_domains" {
+  description = "Extra domains to serve"
+  type = list(string)
+  default = [
+    "extra-domain.test"
+  ]
 }
