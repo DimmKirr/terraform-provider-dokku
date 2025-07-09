@@ -19,7 +19,10 @@ provider "dokku" {
 resource "dokku_app" "complex_app" {
   app_name = var.app_name
 
-  config = var.app_config
+  config = merge(var.app_config, {
+    MERGED_VAR = "foo"
+    NODE_ENV   = "production"
+  })
 
   # Use a set of domains
   domains = [
