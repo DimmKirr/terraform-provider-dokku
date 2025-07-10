@@ -1,24 +1,17 @@
 package test
 
 import (
-	"crypto/rand"
-	"crypto/rsa"
-	"crypto/x509"
-	"encoding/pem"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/gruntwork-io/terratest/modules/docker"
 	"github.com/gruntwork-io/terratest/modules/ssh"
 	"github.com/gruntwork-io/terratest/modules/terraform"
 	"github.com/gruntwork-io/terratest/modules/test-structure"
 	"github.com/stretchr/testify/require"
-	cryptossh "golang.org/x/crypto/ssh"
 )
 
 func TestComplexAppConfig(t *testing.T) {
@@ -33,139 +26,15 @@ func TestComplexAppConfig(t *testing.T) {
 	// Generate SSH keys first
 	var sshKeys *testSSHKeys
 	test_structure.RunTestStage(t, "generate_ssh_keys", func() {
-		// Generate RSA private key
-		privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
-		require.NoError(t, err, "Failed to generate private key")
-
-		// Encode private key to PEM format
-		privateKeyPEM := &pem.Block{
-			Type:  "RSA PRIVATE KEY",
-			Bytes: x509.MarshalPKCS1PrivateKey(privateKey),
-		}
-		privateKeyBytes := pem.EncodeToMemory(privateKeyPEM)
-
-		// Generate public key in SSH format
-		publicKey, err := cryptossh.NewPublicKey(&privateKey.PublicKey)
-		require.NoError(t, err, "Failed to generate public key")
-		publicKeySSH := string(cryptossh.MarshalAuthorizedKey(publicKey))
-
-		// Write keys to files
-		privateKeyPath := filepath.Join(testDir, "ssh_key")
-		publicKeyPath := filepath.Join(testDir, "ssh_key.pub")
-
-		err = os.WriteFile(privateKeyPath, privateKeyBytes, 0600)
-		require.NoError(t, err, "Failed to write private key")
-
-		err = os.WriteFile(publicKeyPath, []byte(publicKeySSH), 0644)
-		require.NoError(t, err, "Failed to write public key")
-
-		t.Logf("Generated SSH keys: %s, %s", privateKeyPath, publicKeyPath)
-
-		sshKeys = &testSSHKeys{
-			privateKeyPEM:  string(privateKeyBytes),
-			publicKeySSH:   strings.TrimSpace(publicKeySSH),
-			privateKeyPath: privateKeyPath,
-			publicKeyPath:  publicKeyPath,
-		}
+		sshKeys = generateSSHKeys(t, testDir)
 	})
 
 	test_structure.RunTestStage(t, "setup_docker", func() {
-		// Try to remove any existing container with the same name
-		cleanupCmd := exec.Command("docker", "rm", "-f", containerName)
-		cleanupCmd.Run()
-
-		// Get the Dokku version to use
-		dokkuVersion := getDokkuVersion()
-		dokkuImageName := fmt.Sprintf("dokku/dokku:%s", dokkuVersion)
-
-		// Run the Dokku container
-		runOptions := &docker.RunOptions{
-			Name:       containerName,
-			Detach:     true,
-			Privileged: true,
-			OtherOptions: []string{
-				"-p", fmt.Sprintf("%s:22", sshPort),
-				"-p", fmt.Sprintf("%s:80", httpPort),
-				"-e", "DOKKU_HOSTNAME=dokku.test",
-				"-e", "DOKKU_HOST_ROOT=/home/dokku/dokku",
-				"-v", "/var/run/docker.sock:/var/run/docker.sock",
-				"--add-host", "host.docker.internal:host-gateway",
-			},
-		}
-
-		docker.Run(t, dokkuImageName, runOptions)
-
-		// Wait for container to be up and running
-		retries := 30
-		retryInterval := 3 * time.Second
-		sshServiceRunning := false
-
-		for i := 0; i < retries; i++ {
-			// Check if SSH is running inside the container
-			sshCheckCmd := exec.Command("docker", "exec", containerName, "service", "ssh", "status")
-			err := sshCheckCmd.Run()
-			if err == nil {
-				sshServiceRunning = true
-				break
-			}
-			require.Error(t, err, "SSH service check failed")
-			time.Sleep(retryInterval)
-		}
-
-		// Ensure dokku is installed and working
-		dokkuInstalled := false
-		if sshServiceRunning {
-			// Check if dokku command works
-			dokkuCheckCmd := exec.Command("docker", "exec", containerName, "dokku", "--version")
-			err := dokkuCheckCmd.Run()
-			if err == nil {
-				dokkuInstalled = true
-			}
-		}
-
-		require.True(t, sshServiceRunning && dokkuInstalled, "Dokku container is not ready")
-		t.Logf("Container ready, waiting additional 30 seconds for services to fully stabilize...")
-		time.Sleep(30 * time.Second)
+		setupDokkuContainer(t)
 	})
 
 	test_structure.RunTestStage(t, "setup_ssh", func() {
-		// Add public key to authorized keys
-		authorizedKeysCmd := exec.Command("docker", "exec", containerName, "bash", "-c",
-			fmt.Sprintf("echo '%s' > /home/dokku/.ssh/authorized_keys", sshKeys.publicKeySSH))
-		require.NoError(t, authorizedKeysCmd.Run(), "Failed to add SSH key to authorized_keys")
-
-		// Test SSH connection
-		maxRetries := 5
-		retryInterval := 2 * time.Second
-
-		for i := 1; i <= maxRetries; i++ {
-			host := ssh.Host{
-				Hostname:    "localhost",
-				SshKeyPair:  &ssh.KeyPair{PrivateKey: sshKeys.privateKeyPEM},
-				SshUserName: "dokku",
-				CustomPort:  3022,
-			}
-
-			setupOutput, err := ssh.CheckSshCommandE(t, host, "id && service ssh status && netstat -tlnp | grep :22")
-			t.Logf("SSH setup attempt %d output: %s", i, setupOutput)
-
-			if err == nil {
-				output, err := ssh.CheckSshCommandE(t, host, "dokku --version")
-				t.Logf("SSH test attempt %d: %v, output: %s", i, err, output)
-
-				if err == nil {
-					t.Logf("SSH connection successful!")
-					return
-				}
-			}
-
-			if i < maxRetries {
-				t.Logf("SSH connection failed, retrying in %v...", retryInterval)
-				time.Sleep(retryInterval)
-			}
-		}
-
-		require.Fail(t, "Failed to establish SSH connection after %d retries", maxRetries)
+		setupSSH(t, sshKeys)
 	})
 
 	test_structure.RunTestStage(t, "apply_terraform", func() {
@@ -189,6 +58,9 @@ func TestComplexAppConfig(t *testing.T) {
 				"DEBUG":    "false",
 				"API_URL":  "https://api.example.com",
 				"PORT":     "5000",
+			},
+			"extra_domains": []string{
+				"extra-domain.test",
 			},
 		}
 
@@ -345,6 +217,35 @@ func TestComplexAppConfig(t *testing.T) {
 		}
 
 		t.Logf("✓ Environment variable verification completed")
+
+		// Verify domains configuration
+		domainsOutput, err := ssh.CheckSshCommandE(t, host, fmt.Sprintf("domains:report %s", appName))
+		if err != nil {
+			t.Logf("Failed to get domains report, skipping domains validation: %v", err)
+			return
+		}
+
+		t.Logf("App domains output: %s", domainsOutput)
+
+		// Expected domains from toset(concat()) function
+		expectedDomains := []string{
+			fmt.Sprintf("extra.%s.dokku.test", appName), // From concat first element
+			fmt.Sprintf("%s.dokku.test", appName),       // From inline list
+			fmt.Sprintf("api.%s.dokku.test", appName),   // From inline list
+			fmt.Sprintf("www.%s.dokku.test", appName),   // From inline list
+			"extra-domain.test",                         // From var.extra_domains
+		}
+
+		// Verify all domains are configured
+		for _, expectedDomain := range expectedDomains {
+			if !strings.Contains(domainsOutput, expectedDomain) {
+				t.Errorf("Domain %s not found in domains report", expectedDomain)
+			} else {
+				t.Logf("✓ Verified domain %s is configured", expectedDomain)
+			}
+		}
+
+		t.Logf("✓ Domains verification completed")
 	})
 
 	test_structure.RunTestStage(t, "destroy_terraform", func() {

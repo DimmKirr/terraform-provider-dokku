@@ -45,7 +45,7 @@ type appResourceModel struct {
 	Checks        *checkModel                  `tfsdk:"checks"`
 	Ports         map[string]portModel         `tfsdk:"ports"`
 	ProxyPorts    map[string]portModel         `tfsdk:"proxy_ports"`
-	Domains       []types.String               `tfsdk:"domains"`
+	Domains       types.Set                    `tfsdk:"domains"`
 	DockerOptions map[string]dockerOptionModel `tfsdk:"docker_options"`
 	Networks      *networkModel                `tfsdk:"networks"`
 	Deploy        *deployModel                 `tfsdk:"deploy"`
@@ -483,12 +483,16 @@ func (r *appResource) Read(ctx context.Context, req resource.ReadRequest, resp *
 		resp.Diagnostics.AddAttributeError(path.Root("domains"), "Unable to get domains", "Unable to get domains. "+err.Error())
 	} else {
 		if len(domains) == 0 {
-			state.Domains = nil
+			state.Domains = basetypes.NewSetNull(types.StringType)
 		} else {
-			state.Domains = make([]types.String, len(domains))
+			// Convert to []attr.Value for basetypes.NewSetValue
+			domainAttrs := make([]attr.Value, len(domains))
 			for i, d := range domains {
-				state.Domains[i] = basetypes.NewStringValue(d)
+				domainAttrs[i] = basetypes.NewStringValue(d)
 			}
+			setVal, diags := basetypes.NewSetValue(types.StringType, domainAttrs)
+			resp.Diagnostics.Append(diags...)
+			state.Domains = setVal
 		}
 	}
 
@@ -678,10 +682,13 @@ func (r *appResource) Create(ctx context.Context, req resource.CreateRequest, re
 		}
 	}
 
-	if len(plan.Domains) != 0 {
+	if !plan.Domains.IsNull() && !plan.Domains.IsUnknown() {
 		var domains []string
-		for _, domain := range plan.Domains {
-			domains = append(domains, domain.ValueString())
+		domainElements := plan.Domains.Elements()
+		for _, domainVal := range domainElements {
+			if stringVal, ok := domainVal.(basetypes.StringValue); ok {
+				domains = append(domains, stringVal.ValueString())
+			}
 		}
 		err := r.client.DomainsSet(ctx, plan.AppName.ValueString(), domains)
 		if err != nil {
@@ -1015,9 +1022,33 @@ func (r *appResource) Update(ctx context.Context, req resource.UpdateRequest, re
 	// -- domains
 	needToSetDomains := false
 	var domainsToSet []string
-	for _, existingDomain := range state.Domains {
+
+	// Get existing domains from state
+	var existingDomains []string
+	if !state.Domains.IsNull() && !state.Domains.IsUnknown() {
+		stateElements := state.Domains.Elements()
+		for _, elem := range stateElements {
+			if stringVal, ok := elem.(basetypes.StringValue); ok {
+				existingDomains = append(existingDomains, stringVal.ValueString())
+			}
+		}
+	}
+
+	// Get planned domains
+	var planDomains []string
+	if !plan.Domains.IsNull() && !plan.Domains.IsUnknown() {
+		planElements := plan.Domains.Elements()
+		for _, elem := range planElements {
+			if stringVal, ok := elem.(basetypes.StringValue); ok {
+				planDomains = append(planDomains, stringVal.ValueString())
+			}
+		}
+	}
+
+	// Check if domains need to be updated
+	for _, existingDomain := range existingDomains {
 		found := false
-		for _, planDomain := range plan.Domains {
+		for _, planDomain := range planDomains {
 			if planDomain == existingDomain {
 				found = true
 				break
@@ -1027,9 +1058,9 @@ func (r *appResource) Update(ctx context.Context, req resource.UpdateRequest, re
 			needToSetDomains = true
 		}
 	}
-	for _, planDomain := range plan.Domains {
+	for _, planDomain := range planDomains {
 		found := false
-		for _, existingDomain := range state.Domains {
+		for _, existingDomain := range existingDomains {
 			if planDomain == existingDomain {
 				found = true
 				break
@@ -1038,7 +1069,7 @@ func (r *appResource) Update(ctx context.Context, req resource.UpdateRequest, re
 		if !found {
 			needToSetDomains = true
 		}
-		domainsToSet = append(domainsToSet, planDomain.ValueString())
+		domainsToSet = append(domainsToSet, planDomain)
 	}
 	if needToSetDomains {
 		var err error

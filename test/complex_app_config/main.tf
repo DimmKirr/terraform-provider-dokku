@@ -24,11 +24,12 @@ resource "dokku_app" "complex_app" {
     NODE_ENV   = "production"
   })
 
-  # Use a set of domains
-  domains = [
+  # Use a set of domains with toset() function to test complex HCL
+  domains = toset(concat(["extra.${var.app_name}.dokku.test"],[
     "${var.app_name}.dokku.test",
-    "api.${var.app_name}.dokku.test"
-  ]
+    "api.${var.app_name}.dokku.test",
+    "www.${var.app_name}.dokku.test"
+  ], var.extra_domains))
 
   # Configure deployment
   deploy = {
