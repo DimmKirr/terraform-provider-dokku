@@ -2,9 +2,11 @@ package services
 
 import (
 	"context"
+	"fmt"
 	"regexp"
 	"strings"
 
+	"github.com/aliksend/terraform-provider-dokku/internal/config"
 	dokkuclient "github.com/aliksend/terraform-provider-dokku/provider/dokku_client"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
@@ -28,7 +30,7 @@ func NewElasticsearchLinkResource() resource.Resource {
 }
 
 type elasticsearchLinkResource struct {
-	client *dokkuclient.Client
+	config *config.DokkuConfig
 }
 
 type elasticsearchLinkResourceModel struct {
@@ -42,14 +44,22 @@ func (r *elasticsearchLinkResource) Metadata(_ context.Context, req resource.Met
 	resp.TypeName = req.ProviderTypeName + "_elasticsearch_link"
 }
 
-// Configure adds the provider configured client to the resource.
-func (r *elasticsearchLinkResource) Configure(_ context.Context, req resource.ConfigureRequest, _ *resource.ConfigureResponse) {
+// Configure adds the provider configured config to the resource.
+func (r *elasticsearchLinkResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
 	if req.ProviderData == nil {
 		return
 	}
 
-	//nolint:forcetypeassert
-	r.client = req.ProviderData.(*dokkuclient.Client)
+	config, ok := req.ProviderData.(*config.DokkuConfig)
+	if !ok {
+		resp.Diagnostics.AddError(
+			"Unexpected Resource Configure Type",
+			fmt.Sprintf("Expected *config.DokkuConfig, got: %T", req.ProviderData),
+		)
+		return
+	}
+
+	r.config = config
 }
 
 // Schema defines the schema for the resource.
@@ -100,8 +110,16 @@ func (r *elasticsearchLinkResource) Read(ctx context.Context, req resource.ReadR
 		return
 	}
 
+	// Create SSH connection on-demand
+	client, err := r.config.NewClient(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("SSH connection failed", err.Error())
+		return
+	}
+	defer r.config.CloseClient(client)
+
 	// Check service existence
-	exists, err := r.client.SimpleServiceExists(ctx, "elasticsearch", state.ServiceName.ValueString())
+	exists, err := client.SimpleServiceExists(ctx, "elasticsearch", state.ServiceName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to check elasticsearch service existence", "Unable to check elasticsearch service existence. "+err.Error())
 		return
@@ -112,7 +130,7 @@ func (r *elasticsearchLinkResource) Read(ctx context.Context, req resource.ReadR
 	}
 
 	// Check link existence
-	exists, err = r.client.SimpleServiceLinkExists(ctx, "elasticsearch", state.ServiceName.ValueString(), state.AppName.ValueString())
+	exists, err = client.SimpleServiceLinkExists(ctx, "elasticsearch", state.ServiceName.ValueString(), state.AppName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to check elasticsearch link existence", "Unable to check elasticsearch link existence. "+err.Error())
 		return
@@ -140,8 +158,16 @@ func (r *elasticsearchLinkResource) Create(ctx context.Context, req resource.Cre
 		return
 	}
 
+	// Create SSH connection on-demand
+	client, err := r.config.NewClient(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("SSH connection failed", err.Error())
+		return
+	}
+	defer r.config.CloseClient(client)
+
 	// Check service existence
-	exists, err := r.client.SimpleServiceExists(ctx, "elasticsearch", plan.ServiceName.ValueString())
+	exists, err := client.SimpleServiceExists(ctx, "elasticsearch", plan.ServiceName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to check elasticsearch service existence", "Unable to check elasticsearch service existence. "+err.Error())
 		return
@@ -152,7 +178,7 @@ func (r *elasticsearchLinkResource) Create(ctx context.Context, req resource.Cre
 	}
 
 	// Check link existence
-	exists, err = r.client.SimpleServiceLinkExists(ctx, "elasticsearch", plan.ServiceName.ValueString(), plan.AppName.ValueString())
+	exists, err = client.SimpleServiceLinkExists(ctx, "elasticsearch", plan.ServiceName.ValueString(), plan.AppName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to check elasticsearch link existence", "Unable to check elasticsearch link existence. "+err.Error())
 		return
@@ -168,7 +194,7 @@ func (r *elasticsearchLinkResource) Create(ctx context.Context, req resource.Cre
 	}
 
 	// Create link
-	err = r.client.SimpleServiceLinkCreate(ctx, "elasticsearch", plan.ServiceName.ValueString(), plan.AppName.ValueString(), args...)
+	err = client.SimpleServiceLinkCreate(ctx, "elasticsearch", plan.ServiceName.ValueString(), plan.AppName.ValueString(), args...)
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to create elasticsearch link", "Unable to create elasticsearch link. "+err.Error())
 		return
@@ -197,8 +223,16 @@ func (r *elasticsearchLinkResource) Delete(ctx context.Context, req resource.Del
 		return
 	}
 
+	// Create SSH connection on-demand
+	client, err := r.config.NewClient(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("SSH connection failed", err.Error())
+		return
+	}
+	defer r.config.CloseClient(client)
+
 	// Check service existence
-	exists, err := r.client.SimpleServiceExists(ctx, "elasticsearch", state.ServiceName.ValueString())
+	exists, err := client.SimpleServiceExists(ctx, "elasticsearch", state.ServiceName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to check elasticsearch service existence", "Unable to check elasticsearch service existence. "+err.Error())
 		return
@@ -208,7 +242,7 @@ func (r *elasticsearchLinkResource) Delete(ctx context.Context, req resource.Del
 	}
 
 	// Check link existence
-	exists, err = r.client.SimpleServiceLinkExists(ctx, "elasticsearch", state.ServiceName.ValueString(), state.AppName.ValueString())
+	exists, err = client.SimpleServiceLinkExists(ctx, "elasticsearch", state.ServiceName.ValueString(), state.AppName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to check elasticsearch link existence", "Unable to check elasticsearch link existence. "+err.Error())
 		return
@@ -218,7 +252,7 @@ func (r *elasticsearchLinkResource) Delete(ctx context.Context, req resource.Del
 	}
 
 	// Unlink service
-	err = r.client.SimpleServiceLinkRemove(ctx, "elasticsearch", state.ServiceName.ValueString(), state.AppName.ValueString())
+	err = client.SimpleServiceLinkRemove(ctx, "elasticsearch", state.ServiceName.ValueString(), state.AppName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to unlink service from app", "Unable to unlink service from app. "+err.Error())
 		return

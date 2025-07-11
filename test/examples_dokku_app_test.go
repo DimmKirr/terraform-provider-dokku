@@ -1,214 +1,47 @@
 package test
 
 import (
-	"crypto/rand"
-	"crypto/rsa"
-	"crypto/x509"
-	"encoding/pem"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/gruntwork-io/terratest/modules/docker"
 	"github.com/gruntwork-io/terratest/modules/ssh"
 	"github.com/gruntwork-io/terratest/modules/terraform"
 	"github.com/gruntwork-io/terratest/modules/test-structure"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	cryptossh "golang.org/x/crypto/ssh"
 )
 
 func TestExampleDokkuApp(t *testing.T) {
+	t.Parallel()
+
 	// Copy the dokku_app example directory first
 	testDir := test_structure.CopyTerraformFolderToTemp(t, "../", "examples/resources/dokku_app")
 
-	// Generate SSH keys first
-	var sshKeys *testSSHKeys
+	// Create isolated test environment
+	var env *testEnvironment
 	test_structure.RunTestStage(t, "generate_ssh_keys", func() {
-		// Generate RSA private key
-		privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
-		require.NoError(t, err, "Failed to generate private key")
-
-		// Encode private key to PEM format
-		privateKeyPEM := &pem.Block{
-			Type:  "RSA PRIVATE KEY",
-			Bytes: x509.MarshalPKCS1PrivateKey(privateKey),
-		}
-		privateKeyBytes := pem.EncodeToMemory(privateKeyPEM)
-
-		// Generate public key in SSH format
-		publicKey, err := cryptossh.NewPublicKey(&privateKey.PublicKey)
-		require.NoError(t, err, "Failed to generate public key")
-		publicKeySSH := string(cryptossh.MarshalAuthorizedKey(publicKey))
-
-		// Write keys to files
-		privateKeyPath := filepath.Join(testDir, "ssh_key")
-		publicKeyPath := filepath.Join(testDir, "ssh_key.pub")
-
-		err = os.WriteFile(privateKeyPath, privateKeyBytes, 0600)
-		require.NoError(t, err, "Failed to write private key")
-
-		err = os.WriteFile(publicKeyPath, []byte(publicKeySSH), 0644)
-		require.NoError(t, err, "Failed to write public key")
-
-		t.Logf("Generated SSH keys: %s, %s", privateKeyPath, publicKeyPath)
-
-		sshKeys = &testSSHKeys{
-			privateKeyPEM:  string(privateKeyBytes),
-			publicKeySSH:   strings.TrimSpace(publicKeySSH),
-			privateKeyPath: privateKeyPath,
-			publicKeyPath:  publicKeyPath,
-		}
+		env = createTestEnvironment(t, testDir)
 	})
 
+	// Ensure cleanup runs regardless of test outcome
+	defer func() {
+		if env != nil {
+			cleanupTestEnvironment(t, env)
+		}
+	}()
+
 	test_structure.RunTestStage(t, "setup_docker", func() {
-		// Try to remove any existing container with the same name
-		cleanupCmd := exec.Command("docker", "rm", "-f", containerName)
-		cleanupCmd.Run()
-
-		// Get the Dokku version to use
-		dokkuVersion := getDokkuVersion()
-		dokkuImageName := fmt.Sprintf("dokku/dokku:%s", dokkuVersion)
-
-		// Run the Dokku container
-		runOptions := &docker.RunOptions{
-			Name:       containerName,
-			Detach:     true,
-			Privileged: true,
-			OtherOptions: []string{
-				"-p", fmt.Sprintf("%s:22", sshPort),
-				"-p", fmt.Sprintf("%s:80", httpPort),
-				"-e", "DOKKU_HOSTNAME=dokku.test",
-				"-e", "DOKKU_HOST_ROOT=/home/dokku/dokku",
-				"-v", "/var/run/docker.sock:/var/run/docker.sock",
-				"--add-host", "host.docker.internal:host-gateway",
-			},
-		}
-
-		docker.Run(t, dokkuImageName, runOptions)
-
-		// Wait for container to be up and running
-		retries := 30
-		retryInterval := 3 * time.Second
-		sshServiceRunning := false
-
-		for i := 0; i < retries; i++ {
-			// Check if SSH is running inside the container
-			sshCheckCmd := exec.Command("docker", "exec", containerName, "service", "ssh", "status")
-			err := sshCheckCmd.Run()
-			if err == nil {
-				sshServiceRunning = true
-				break
-			}
-			time.Sleep(retryInterval)
-		}
-
-		// Ensure dokku is installed and working
-		dokkuInstalled := false
-		if sshServiceRunning {
-			// Check if dokku command works
-			dokkuCheckCmd := exec.Command("docker", "exec", containerName, "dokku", "--version")
-			err := dokkuCheckCmd.Run()
-			if err == nil {
-				dokkuInstalled = true
-			}
-		}
-
-		// Configure sudo to not require a password for the dokku user
-		sudoersCmd := exec.Command("docker", "exec", containerName, "bash", "-c", "echo 'dokku ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/dokku")
-		sudoersOutput, err := sudoersCmd.CombinedOutput()
-		require.NoError(t, err, "Failed to configure sudoers: %s", string(sudoersOutput))
-
-		require.True(t, sshServiceRunning && dokkuInstalled, "Dokku container is not ready")
-		t.Logf("Container ready, waiting additional 15 seconds for services to fully stabilize...")
-		time.Sleep(15 * time.Second)
+		setupDokkuContainer(t, env)
 	})
 
 	test_structure.RunTestStage(t, "setup_ssh", func() {
-		// Use the generated SSH keys
-		pubKey := sshKeys.publicKeySSH
-		privateKeyPath := sshKeys.privateKeyPath
-
-		// Fix permissions on private key first
-		exec.Command("chmod", "600", privateKeyPath).Run()
-
-		// Use a correct forced command format that works with dokku
-		authorizedKeyEntry := fmt.Sprintf(`command="dokku $SSH_ORIGINAL_COMMAND",no-port-forwarding,no-agent-forwarding %s dokku-test-key`, pubKey)
-
-		// Multiple attempts to set up SSH properly
-		for attempt := 0; attempt < 3; attempt++ {
-			// Configure SSH key in the container with more thorough setup
-			setupCmd := exec.Command("docker", "exec", containerName, "bash", "-c", fmt.Sprintf(`
-				# Ensure dokku user exists
-				id dokku || exit 1
-				
-				# Create .ssh directory with proper permissions
-				mkdir -p /home/dokku/.ssh
-				chmod 700 /home/dokku/.ssh
-				
-				# Add the SSH key
-				echo '%s' > /home/dokku/.ssh/authorized_keys
-				chmod 600 /home/dokku/.ssh/authorized_keys
-				chown -R dokku:dokku /home/dokku/.ssh
-				
-				# Ensure SSH daemon is running
-				service ssh start || service sshd start
-				sleep 2
-				
-				# Test that SSH service is listening
-				netstat -tlnp | grep :22 || ss -tlnp | grep :22
-			`, authorizedKeyEntry))
-
-			output, err := setupCmd.CombinedOutput()
-			t.Logf("SSH setup attempt %d output: %s", attempt+1, string(output))
-
-			if err == nil {
-				break
-			}
-
-			if attempt == 2 {
-				t.Logf("SSH setup failed after 3 attempts: %v", err)
-			}
-			time.Sleep(2 * time.Second)
-		}
-
-		// Give SSH service more time to fully start
-		time.Sleep(5 * time.Second)
-
-		// Verify SSH connectivity with the dokku version command
-		maxRetries := 5
-		retryDelay := 3 * time.Second
-
-		for i := 0; i < maxRetries; i++ {
-			sshCmd := exec.Command("ssh", "-F", "/dev/null", // Bypass user SSH config
-				"-i", privateKeyPath,
-				"-p", sshPort,
-				"-o", "StrictHostKeyChecking=no",
-				"-o", "UserKnownHostsFile=/dev/null",
-				"-o", "ConnectTimeout=10",
-				"-o", "LogLevel=ERROR",
-				"dokku@localhost",
-				"version")
-
-			output, err := sshCmd.CombinedOutput()
-			t.Logf("SSH test attempt %d: %v, output: %s", i+1, err, string(output))
-
-			if err == nil {
-				t.Logf("SSH connection successful!")
-				return
-			}
-
-			if i < maxRetries-1 {
-				t.Logf("SSH connection failed, retrying in %v...", retryDelay)
-				time.Sleep(retryDelay)
-			}
-		}
-
-		require.Fail(t, "Failed to establish SSH connection after %d retries", maxRetries)
+		setupSSH(t, env)
 	})
 
 	test_structure.RunTestStage(t, "apply_terraform", func() {
@@ -273,11 +106,14 @@ variable "docker_image" {
 		err = os.WriteFile(variablesFile, []byte(variablesTF), 0644)
 		require.NoError(t, err, "Failed to write variables.tf")
 
-		// Base terraform options
+		// Base terraform options using environment-specific settings
+		sshPort, err := strconv.Atoi(env.ExternalPorts["ssh"])
+		require.NoError(t, err, "Failed to parse SSH port")
+
 		vars := map[string]interface{}{
 			"dokku_host":      "localhost",
-			"dokku_port":      3022,
-			"ssh_private_key": sshKeys.privateKeyPEM,
+			"dokku_port":      sshPort,
+			"ssh_private_key": env.SSHKeys.privateKeyPEM,
 			"docker_image":    "jmalloc/echo-server",
 		}
 
@@ -309,13 +145,13 @@ variable "docker_image" {
 		// Also, the proxy might be disabled due to complex configuration in the example
 
 		// First check if proxy is enabled for demo2
-		proxyCheckCmd := exec.Command("docker", "exec", containerName, "dokku", "proxy:report", "demo2")
+		proxyCheckCmd := exec.Command("docker", "exec", env.ContainerName, "dokku", "proxy:report", "demo2")
 		proxyOutput, err := proxyCheckCmd.CombinedOutput()
 		if err == nil {
 			t.Logf("Proxy status: %s", string(proxyOutput))
 			if strings.Contains(string(proxyOutput), "Proxy enabled:                 false") {
 				t.Logf("Proxy is disabled, enabling it...")
-				enableCmd := exec.Command("docker", "exec", containerName, "dokku", "proxy:enable", "demo2")
+				enableCmd := exec.Command("docker", "exec", env.ContainerName, "dokku", "proxy:enable", "demo2")
 				enableOutput, enableErr := enableCmd.CombinedOutput()
 				if enableErr != nil {
 					t.Logf("Enable proxy output: %s", string(enableOutput))
@@ -328,7 +164,7 @@ variable "docker_image" {
 		// No need to manually restart - that's the provider's job
 
 		// Manually reload nginx to ensure the proxy configuration is active
-		reloadCmd := exec.Command("docker", "exec", containerName, "nginx", "-s", "reload")
+		reloadCmd := exec.Command("docker", "exec", env.ContainerName, "nginx", "-s", "reload")
 		err = reloadCmd.Run()
 		if err != nil {
 			t.Logf("Nginx reload warning (expected in test environment): %v", err)
@@ -342,15 +178,19 @@ variable "docker_image" {
 		appName := "demo2" // Use demo2 as defined in the example
 
 		keyPair := &ssh.KeyPair{
-			PublicKey:  sshKeys.publicKeySSH,
-			PrivateKey: sshKeys.privateKeyPEM,
+			PublicKey:  env.SSHKeys.publicKeySSH,
+			PrivateKey: env.SSHKeys.privateKeyPEM,
 		}
+
+		// Convert external port string to int
+		customPort, err := strconv.Atoi(env.ExternalPorts["ssh"])
+		require.NoError(t, err, "Failed to parse SSH port")
 
 		host := ssh.Host{
 			Hostname:    "localhost",
 			SshKeyPair:  keyPair,
 			SshUserName: "dokku",
-			CustomPort:  3022,
+			CustomPort:  customPort,
 		}
 
 		// Test SSH connection first with a retry mechanism
@@ -418,9 +258,12 @@ variable "docker_image" {
 		var httpResponse string
 		var httpErr error
 
+		httpPort := env.ExternalPorts["http"]
+		httpURL := fmt.Sprintf("http://localhost:%s", httpPort)
+
 		for i := 0; i < maxRetries; i++ {
 			// Use curl to test HTTP connectivity since the app should be accessible via the exposed port
-			curlCmd := exec.Command("curl", "-s", "-f", "http://localhost:8080")
+			curlCmd := exec.Command("curl", "-s", "-f", "-H", "Host: example.com", httpURL)
 			output, err := curlCmd.Output()
 
 			if err == nil {
@@ -440,7 +283,7 @@ variable "docker_image" {
 
 		// Verify the response contains expected content from jmalloc/echo-server
 		assert.Contains(t, httpResponse, "Request served by", "HTTP response should contain 'Request served by' indicating the echo-server container is serving content")
-		assert.Contains(t, httpResponse, "Host: localhost:8080", "HTTP response should show the app received the request on port 8080")
+		assert.Contains(t, httpResponse, "Host: example.com", "HTTP response should show the app received the request on the correct port")
 
 		t.Logf("HTTP validation successful! Response preview: %.200s...", httpResponse)
 	})
@@ -450,7 +293,6 @@ variable "docker_image" {
 		terraform.Destroy(t, terraformOptions)
 	})
 
-	test_structure.RunTestStage(t, "cleanup_docker", func() {
-		cleanupDocker(t)
-	})
+	// Note: Final cleanup is handled by the defer statement at the beginning
+	// which calls cleanupTestEnvironment(t, env)
 }

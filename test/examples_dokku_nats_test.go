@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -18,47 +19,43 @@ import (
 )
 
 func TestExampleDokkuNats(t *testing.T) {
+	t.Parallel()
+
 	// Copy the dokku_nats example directory first
 	testDir := test_structure.CopyTerraformFolderToTemp(t, "../", "examples/resources/dokku_nats")
 
-	// Setup cleanup using defer to ensure it always runs
-	defer test_structure.RunTestStage(t, "cleanup_docker", func() {
-		cleanupDocker(t)
-	})
-
-	defer test_structure.RunTestStage(t, "cleanup_test_files", func() {
-		cleanupTestFiles(t, testDir)
-	})
-
-	defer test_structure.RunTestStage(t, "destroy_terraform", func() {
-		destroyTerraform(t, testDir)
-	})
-
-	// Generate SSH keys first
-	var sshKeys *testSSHKeys
+	// Create isolated test environment
+	var env *testEnvironment
 	test_structure.RunTestStage(t, "generate_ssh_keys", func() {
-		sshKeys = generateSSHKeys(t, testDir)
+		env = createTestEnvironment(t, testDir)
 	})
+
+	// Ensure cleanup runs regardless of test outcome
+	defer func() {
+		if env != nil {
+			cleanupTestEnvironment(t, env)
+		}
+	}()
 
 	test_structure.RunTestStage(t, "setup_docker", func() {
-		setupDokkuContainer(t)
+		setupDokkuContainer(t, env)
 	})
 
 	test_structure.RunTestStage(t, "setup_ssh", func() {
-		setupSSH(t, sshKeys)
+		setupSSH(t, env)
 	})
 
 	test_structure.RunTestStage(t, "install_plugins", func() {
 		// Install the NATS plugin
 		t.Logf("Installing NATS plugin...")
 
-		installCmd := exec.Command("docker", "exec", containerName, "dokku", "plugin:install", "https://github.com/dokku/dokku-nats.git", "nats")
+		installCmd := exec.Command("docker", "exec", env.ContainerName, "dokku", "plugin:install", "https://github.com/dokku/dokku-nats.git", "nats")
 		output, err := installCmd.CombinedOutput()
 		t.Logf("Plugin install output: %s", string(output))
 		require.NoError(t, err, "Failed to install NATS plugin")
 
 		// Verify plugin was installed
-		verifyCmd := exec.Command("docker", "exec", containerName, "dokku", "plugin:list")
+		verifyCmd := exec.Command("docker", "exec", env.ContainerName, "dokku", "plugin:list")
 		verifyOutput, err := verifyCmd.CombinedOutput()
 		t.Logf("Plugin list output: %s", string(verifyOutput))
 		require.NoError(t, err, "Failed to list plugins")
@@ -71,7 +68,7 @@ func TestExampleDokkuNats(t *testing.T) {
 		t.Logf("Cleaning up existing nats services...")
 
 		// Try to destroy existing service (ignore errors if it doesn't exist)
-		destroyCmd := exec.Command("docker", "exec", containerName, "dokku", "nats:destroy", serviceName, "--force")
+		destroyCmd := exec.Command("docker", "exec", env.ContainerName, "dokku", "nats:destroy", serviceName, "--force")
 		destroyOutput, err := destroyCmd.CombinedOutput()
 		if err != nil {
 			t.Logf("Service cleanup (expected if service doesn't exist): %v, output: %s", err, string(destroyOutput))
@@ -80,7 +77,7 @@ func TestExampleDokkuNats(t *testing.T) {
 		}
 
 		// Also clean up any leftover containers using Docker command within the dokku container
-		containerCleanupCmd := exec.Command("docker", "exec", containerName, "docker", "container", "rm", "-f", "dokku.nats.demo")
+		containerCleanupCmd := exec.Command("docker", "exec", env.ContainerName, "docker", "container", "rm", "-f", "dokku.nats.demo")
 		containerCleanupOutput, containerErr := containerCleanupCmd.CombinedOutput()
 		if containerErr != nil {
 			t.Logf("Container cleanup (expected if container doesn't exist): %v, output: %s", containerErr, string(containerCleanupOutput))
@@ -89,7 +86,7 @@ func TestExampleDokkuNats(t *testing.T) {
 		}
 
 		// Clean up any nats volumes that might conflict
-		volumeCleanupCmd := exec.Command("docker", "exec", containerName, "docker", "volume", "rm", "-f", "dokku.nats.demo")
+		volumeCleanupCmd := exec.Command("docker", "exec", env.ContainerName, "docker", "volume", "rm", "-f", "dokku.nats.demo")
 		volumeCleanupOutput, volumeErr := volumeCleanupCmd.CombinedOutput()
 		if volumeErr != nil {
 			t.Logf("Volume cleanup (expected if volume doesn't exist): %v, output: %s", volumeErr, string(volumeCleanupOutput))
@@ -131,11 +128,14 @@ variable "ssh_private_key" {
 		err := os.WriteFile(variablesFile, []byte(variablesTF), 0644)
 		require.NoError(t, err, "Failed to write variables.tf")
 
-		// Base terraform options
+		// Base terraform options using environment-specific settings
+		sshPort, err := strconv.Atoi(env.ExternalPorts["ssh"])
+		require.NoError(t, err, "Failed to parse SSH port")
+
 		vars := map[string]interface{}{
 			"dokku_host":      "localhost",
-			"dokku_port":      3022,
-			"ssh_private_key": sshKeys.privateKeyPEM,
+			"dokku_port":      sshPort,
+			"ssh_private_key": env.SSHKeys.privateKeyPEM,
 		}
 
 		terraformOptions := &terraform.Options{
@@ -168,15 +168,19 @@ variable "ssh_private_key" {
 		serviceName := "demo" // Use service name as identifier
 
 		keyPair := &ssh.KeyPair{
-			PublicKey:  sshKeys.publicKeySSH,
-			PrivateKey: sshKeys.privateKeyPEM,
+			PublicKey:  env.SSHKeys.publicKeySSH,
+			PrivateKey: env.SSHKeys.privateKeyPEM,
 		}
+
+		// Convert external port string to int
+		customPort, err := strconv.Atoi(env.ExternalPorts["ssh"])
+		require.NoError(t, err, "Failed to parse SSH port")
 
 		host := ssh.Host{
 			Hostname:    "localhost",
 			SshKeyPair:  keyPair,
 			SshUserName: "dokku",
-			CustomPort:  3022,
+			CustomPort:  customPort,
 		}
 
 		t.Logf("Validating dokku_nats example: %s", serviceName)
@@ -208,7 +212,7 @@ variable "ssh_private_key" {
 		t.Logf("Testing NATS connection for service: %s", serviceName)
 
 		// Get service info to validate the service exists and is properly configured
-		infoCmd := exec.Command("docker", "exec", containerName, "dokku", "nats:info", serviceName)
+		infoCmd := exec.Command("docker", "exec", env.ContainerName, "dokku", "nats:info", serviceName)
 		infoOutput, infoErr := infoCmd.CombinedOutput()
 		require.NoError(t, infoErr, "Failed to get nats service info")
 
@@ -238,5 +242,6 @@ variable "ssh_private_key" {
 		}
 	})
 
-	// Note: Cleanup stages are now handled by defer statements at the top of the function
+	// Note: Final cleanup is handled by the defer statement at the beginning
+	// which calls cleanupTestEnvironment(t, env)
 }

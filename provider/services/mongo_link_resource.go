@@ -2,9 +2,11 @@ package services
 
 import (
 	"context"
+	"fmt"
 	"regexp"
 	"strings"
 
+	"github.com/aliksend/terraform-provider-dokku/internal/config"
 	dokkuclient "github.com/aliksend/terraform-provider-dokku/provider/dokku_client"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
@@ -28,7 +30,7 @@ func NewMongoLinkResource() resource.Resource {
 }
 
 type mongoLinkResource struct {
-	client *dokkuclient.Client
+	config *config.DokkuConfig
 }
 
 type mongoLinkResourceModel struct {
@@ -42,14 +44,22 @@ func (r *mongoLinkResource) Metadata(_ context.Context, req resource.MetadataReq
 	resp.TypeName = req.ProviderTypeName + "_mongo_link"
 }
 
-// Configure adds the provider configured client to the resource.
-func (r *mongoLinkResource) Configure(_ context.Context, req resource.ConfigureRequest, _ *resource.ConfigureResponse) {
+// Configure adds the provider configured config to the resource.
+func (r *mongoLinkResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
 	if req.ProviderData == nil {
 		return
 	}
 
-	//nolint:forcetypeassert
-	r.client = req.ProviderData.(*dokkuclient.Client)
+	config, ok := req.ProviderData.(*config.DokkuConfig)
+	if !ok {
+		resp.Diagnostics.AddError(
+			"Unexpected Resource Configure Type",
+			fmt.Sprintf("Expected *config.DokkuConfig, got: %T", req.ProviderData),
+		)
+		return
+	}
+
+	r.config = config
 }
 
 // Schema defines the schema for the resource.
@@ -100,8 +110,16 @@ func (r *mongoLinkResource) Read(ctx context.Context, req resource.ReadRequest, 
 		return
 	}
 
+	// Create SSH connection on-demand
+	client, err := r.config.NewClient(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("SSH connection failed", err.Error())
+		return
+	}
+	defer r.config.CloseClient(client)
+
 	// Check service existence
-	exists, err := r.client.SimpleServiceExists(ctx, "mongo", state.ServiceName.ValueString())
+	exists, err := client.SimpleServiceExists(ctx, "mongo", state.ServiceName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to check mongo service existence", "Unable to check mongo service existence. "+err.Error())
 		return
@@ -112,7 +130,7 @@ func (r *mongoLinkResource) Read(ctx context.Context, req resource.ReadRequest, 
 	}
 
 	// Check link existence
-	exists, err = r.client.SimpleServiceLinkExists(ctx, "mongo", state.ServiceName.ValueString(), state.AppName.ValueString())
+	exists, err = client.SimpleServiceLinkExists(ctx, "mongo", state.ServiceName.ValueString(), state.AppName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to check mongo link existence", "Unable to check mongo link existence. "+err.Error())
 		return
@@ -140,8 +158,16 @@ func (r *mongoLinkResource) Create(ctx context.Context, req resource.CreateReque
 		return
 	}
 
+	// Create SSH connection on-demand
+	client, err := r.config.NewClient(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("SSH connection failed", err.Error())
+		return
+	}
+	defer r.config.CloseClient(client)
+
 	// Check service existence
-	exists, err := r.client.SimpleServiceExists(ctx, "mongo", plan.ServiceName.ValueString())
+	exists, err := client.SimpleServiceExists(ctx, "mongo", plan.ServiceName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to check mongo service existence", "Unable to check mongo service existence. "+err.Error())
 		return
@@ -152,7 +178,7 @@ func (r *mongoLinkResource) Create(ctx context.Context, req resource.CreateReque
 	}
 
 	// Check link existence
-	exists, err = r.client.SimpleServiceLinkExists(ctx, "mongo", plan.ServiceName.ValueString(), plan.AppName.ValueString())
+	exists, err = client.SimpleServiceLinkExists(ctx, "mongo", plan.ServiceName.ValueString(), plan.AppName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to check mongo link existence", "Unable to check mongo link existence. "+err.Error())
 		return
@@ -168,7 +194,7 @@ func (r *mongoLinkResource) Create(ctx context.Context, req resource.CreateReque
 	}
 
 	// Create link
-	err = r.client.SimpleServiceLinkCreate(ctx, "mongo", plan.ServiceName.ValueString(), plan.AppName.ValueString(), args...)
+	err = client.SimpleServiceLinkCreate(ctx, "mongo", plan.ServiceName.ValueString(), plan.AppName.ValueString(), args...)
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to create mongo link", "Unable to create mongo link. "+err.Error())
 		return
@@ -197,8 +223,16 @@ func (r *mongoLinkResource) Delete(ctx context.Context, req resource.DeleteReque
 		return
 	}
 
+	// Create SSH connection on-demand
+	client, err := r.config.NewClient(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("SSH connection failed", err.Error())
+		return
+	}
+	defer r.config.CloseClient(client)
+
 	// Check service existence
-	exists, err := r.client.SimpleServiceExists(ctx, "mongo", state.ServiceName.ValueString())
+	exists, err := client.SimpleServiceExists(ctx, "mongo", state.ServiceName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to check mongo service existence", "Unable to check mongo service existence. "+err.Error())
 		return
@@ -208,7 +242,7 @@ func (r *mongoLinkResource) Delete(ctx context.Context, req resource.DeleteReque
 	}
 
 	// Check link existence
-	exists, err = r.client.SimpleServiceLinkExists(ctx, "mongo", state.ServiceName.ValueString(), state.AppName.ValueString())
+	exists, err = client.SimpleServiceLinkExists(ctx, "mongo", state.ServiceName.ValueString(), state.AppName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to check mongo link existence", "Unable to check mongo link existence. "+err.Error())
 		return
@@ -218,7 +252,7 @@ func (r *mongoLinkResource) Delete(ctx context.Context, req resource.DeleteReque
 	}
 
 	// Unlink service
-	err = r.client.SimpleServiceLinkRemove(ctx, "mongo", state.ServiceName.ValueString(), state.AppName.ValueString())
+	err = client.SimpleServiceLinkRemove(ctx, "mongo", state.ServiceName.ValueString(), state.AppName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to unlink service from app", "Unable to unlink service from app. "+err.Error())
 		return

@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/aliksend/terraform-provider-dokku/internal/config"
 	dokkuclient "github.com/aliksend/terraform-provider-dokku/provider/dokku_client"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/mapvalidator"
@@ -35,7 +36,7 @@ func NewAppResource() resource.Resource {
 }
 
 type appResource struct {
-	client *dokkuclient.Client
+	config *config.DokkuConfig
 }
 
 type appResourceModel struct {
@@ -92,14 +93,22 @@ func (r *appResource) Metadata(_ context.Context, req resource.MetadataRequest, 
 	resp.TypeName = req.ProviderTypeName + "_app"
 }
 
-// Configure adds the provider configured client to the resource.
-func (r *appResource) Configure(_ context.Context, req resource.ConfigureRequest, _ *resource.ConfigureResponse) {
+// Configure adds the provider configured config to the resource.
+func (r *appResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
 	if req.ProviderData == nil {
 		return
 	}
 
-	//nolint:forcetypeassert
-	r.client = req.ProviderData.(*dokkuclient.Client)
+	config, ok := req.ProviderData.(*config.DokkuConfig)
+	if !ok {
+		resp.Diagnostics.AddError(
+			"Unexpected Resource Configure Type",
+			fmt.Sprintf("Expected *config.DokkuConfig, got: %T", req.ProviderData),
+		)
+		return
+	}
+
+	r.config = config
 }
 
 // Schema defines the schema for the resource.
@@ -388,8 +397,16 @@ func (r *appResource) Read(ctx context.Context, req resource.ReadRequest, resp *
 		return
 	}
 
+	// Create SSH connection on-demand
+	client, err := r.config.NewClient(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("SSH connection failed", err.Error())
+		return
+	}
+	defer r.config.CloseClient(client)
+
 	// Check app existence
-	exists, err := r.client.AppExists(ctx, state.AppName.ValueString())
+	exists, err := client.AppExists(ctx, state.AppName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddAttributeError(path.Root("app_name"), "Unable to check app existence", "Unable to check app existence. "+err.Error())
 		return
@@ -399,7 +416,7 @@ func (r *appResource) Read(ctx context.Context, req resource.ReadRequest, resp *
 		return
 	}
 
-	config, err := r.client.ConfigExport(ctx, state.AppName.ValueString())
+	config, err := client.ConfigExport(ctx, state.AppName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddAttributeError(path.Root("config"), "Unable to get config", "Unable to get config. "+err.Error())
 	} else {
@@ -442,7 +459,7 @@ func (r *appResource) Read(ctx context.Context, req resource.ReadRequest, resp *
 		}
 	}
 
-	storage, err := r.client.StorageExport(ctx, state.AppName.ValueString())
+	storage, err := client.StorageExport(ctx, state.AppName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddAttributeError(path.Root("storage"), "Unable to get storage", "Unable to get storage. "+err.Error())
 	} else {
@@ -465,7 +482,7 @@ func (r *appResource) Read(ctx context.Context, req resource.ReadRequest, resp *
 		}
 	}
 
-	checkStatus, err := r.client.ChecksGet(ctx, state.AppName.ValueString())
+	checkStatus, err := client.ChecksGet(ctx, state.AppName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddAttributeError(path.Root("checks"), "Unable to get checks", "Unable to get checks. "+err.Error())
 	} else {
@@ -478,7 +495,7 @@ func (r *appResource) Read(ctx context.Context, req resource.ReadRequest, resp *
 		}
 	}
 
-	domains, err := r.client.DomainsExport(ctx, state.AppName.ValueString())
+	domains, err := client.DomainsExport(ctx, state.AppName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddAttributeError(path.Root("domains"), "Unable to get domains", "Unable to get domains. "+err.Error())
 	} else {
@@ -496,7 +513,7 @@ func (r *appResource) Read(ctx context.Context, req resource.ReadRequest, resp *
 		}
 	}
 
-	ports, err := r.client.PortsExport(ctx, state.AppName.ValueString())
+	ports, err := client.PortsExport(ctx, state.AppName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddAttributeError(path.Root("ports"), "Unable to get ports", "Unable to get ports. "+err.Error())
 	} else {
@@ -536,7 +553,7 @@ func (r *appResource) Read(ctx context.Context, req resource.ReadRequest, resp *
 
 	// dockerOptions -- unable to read because it can be set externally
 
-	networks, err := r.client.NetworksReport(ctx, state.AppName.ValueString())
+	networks, err := client.NetworksReport(ctx, state.AppName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddAttributeError(path.Root("networks"), "Unable to get networks", "Unable to get networks. "+err.Error())
 	} else {
@@ -593,8 +610,16 @@ func (r *appResource) Create(ctx context.Context, req resource.CreateRequest, re
 		return
 	}
 
+	// Create SSH connection on-demand
+	client, err := r.config.NewClient(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("SSH connection failed", err.Error())
+		return
+	}
+	defer r.config.CloseClient(client)
+
 	// Check app existence
-	exists, err := r.client.AppExists(ctx, plan.AppName.ValueString())
+	exists, err := client.AppExists(ctx, plan.AppName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddAttributeError(path.Root("app_name"), "Unable to check app existence", "Unable to check app existence. "+err.Error())
 		return
@@ -605,7 +630,7 @@ func (r *appResource) Create(ctx context.Context, req resource.CreateRequest, re
 	}
 
 	// Create new app
-	err = r.client.AppCreate(ctx, plan.AppName.ValueString())
+	err = client.AppCreate(ctx, plan.AppName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to create app", "Unable to create app. "+err.Error())
 		// if not created - return to not try to destroy on other errors
@@ -620,19 +645,19 @@ func (r *appResource) Create(ctx context.Context, req resource.CreateRequest, re
 				config[k] = stringVal.ValueString()
 			}
 		}
-		err := r.client.ConfigSet(ctx, plan.AppName.ValueString(), config)
+		err := client.ConfigSet(ctx, plan.AppName.ValueString(), config)
 		if err != nil {
 			resp.Diagnostics.AddAttributeError(path.Root("config"), "Unable to set config", "Unable to set config. "+err.Error())
 		}
 	}
 
 	for hostPath, storage := range plan.Storage {
-		err := r.client.StorageEnsure(ctx, hostPath, storage.LocalDirectory.ValueStringPointer())
+		err := client.StorageEnsure(ctx, hostPath, storage.LocalDirectory.ValueStringPointer())
 		if err != nil {
 			resp.Diagnostics.AddAttributeError(path.Root("storage").AtMapKey(hostPath), "Unable to ensure storage", "Unable to ensure storage. "+err.Error())
 		}
 
-		err = r.client.StorageMount(ctx, plan.AppName.ValueString(), hostPath, storage.MountPath.ValueString())
+		err = client.StorageMount(ctx, plan.AppName.ValueString(), hostPath, storage.MountPath.ValueString())
 		if err != nil {
 			resp.Diagnostics.AddAttributeError(path.Root("storage").AtMapKey(hostPath), "Unable to mount storage", "Unable to mount storage. "+err.Error())
 		}
@@ -640,7 +665,7 @@ func (r *appResource) Create(ctx context.Context, req resource.CreateRequest, re
 
 	if plan.Checks != nil {
 		if !plan.Checks.Status.IsNull() {
-			err := r.client.ChecksSet(ctx, plan.AppName.ValueString(), plan.Checks.Status.ValueString())
+			err := client.ChecksSet(ctx, plan.AppName.ValueString(), plan.Checks.Status.ValueString())
 			if err != nil {
 				resp.Diagnostics.AddAttributeError(path.Root("checks"), "Unable to set checks", "Unable to set checks. "+err.Error())
 			}
@@ -667,16 +692,16 @@ func (r *appResource) Create(ctx context.Context, req resource.CreateRequest, re
 				ContainerPort: port.ContainerPort.ValueString(),
 			})
 		}
-		err := r.client.PortsSet(ctx, plan.AppName.ValueString(), ports)
+		err := client.PortsSet(ctx, plan.AppName.ValueString(), ports)
 		if err != nil {
 			resp.Diagnostics.AddAttributeError(path.Root("ports"), "Unable to set ports", "Unable to set ports. "+err.Error())
 		}
-		err = r.client.ProxyEnable(ctx, plan.AppName.ValueString())
+		err = client.ProxyEnable(ctx, plan.AppName.ValueString())
 		if err != nil {
 			resp.Diagnostics.AddAttributeError(path.Root("ports"), "Unable to enable ports", "Unable to enable ports. "+err.Error())
 		}
 	} else {
-		err = r.client.ProxyDisable(ctx, plan.AppName.ValueString())
+		err = client.ProxyDisable(ctx, plan.AppName.ValueString())
 		if err != nil {
 			resp.Diagnostics.AddAttributeError(path.Root("ports"), "Unable to disable ports", "Unable to disable ports. "+err.Error())
 		}
@@ -690,23 +715,23 @@ func (r *appResource) Create(ctx context.Context, req resource.CreateRequest, re
 				domains = append(domains, stringVal.ValueString())
 			}
 		}
-		err := r.client.DomainsSet(ctx, plan.AppName.ValueString(), domains)
+		err := client.DomainsSet(ctx, plan.AppName.ValueString(), domains)
 		if err != nil {
 			resp.Diagnostics.AddAttributeError(path.Root("domains"), "Unable to add domain", "Unable to add domain. "+err.Error())
 		}
-		err = r.client.DomainsEnable(ctx, plan.AppName.ValueString())
+		err = client.DomainsEnable(ctx, plan.AppName.ValueString())
 		if err != nil {
 			resp.Diagnostics.AddAttributeError(path.Root("domains"), "Unable to enable domains support", "Unable to enable domains support. "+err.Error())
 		}
 	} else {
-		err = r.client.DomainsDisable(ctx, plan.AppName.ValueString())
+		err = client.DomainsDisable(ctx, plan.AppName.ValueString())
 		if err != nil {
 			resp.Diagnostics.AddAttributeError(path.Root("domains"), "Unable to disable domains support", "Unable to disable domains support. "+err.Error())
 		}
 	}
 
 	for option, dockerOption := range plan.DockerOptions {
-		err := r.client.DockerOptionAdd(ctx, plan.AppName.ValueString(), formatDockerOptionsPhases(dockerOption.Phase), option)
+		err := client.DockerOptionAdd(ctx, plan.AppName.ValueString(), formatDockerOptionsPhases(dockerOption.Phase), option)
 		if err != nil {
 			resp.Diagnostics.AddAttributeError(path.Root("docker_options").AtMapKey(option), "Unable to add docker option", "Unable to add docker option. "+err.Error())
 		}
@@ -714,19 +739,19 @@ func (r *appResource) Create(ctx context.Context, req resource.CreateRequest, re
 
 	if plan.Networks != nil {
 		if !plan.Networks.AttachPostCreate.IsNull() {
-			err := r.client.NetworkEnsureAndSetForApp(ctx, plan.AppName.ValueString(), "attach-post-create", plan.Networks.AttachPostCreate.ValueString())
+			err := client.NetworkEnsureAndSetForApp(ctx, plan.AppName.ValueString(), "attach-post-create", plan.Networks.AttachPostCreate.ValueString())
 			if err != nil {
 				resp.Diagnostics.AddAttributeError(path.Root("networks").AtName("attach_post_create"), "Unable to set network", "Unable to set network. "+err.Error())
 			}
 		}
 		if !plan.Networks.AttachPostDeploy.IsNull() {
-			err := r.client.NetworkEnsureAndSetForApp(ctx, plan.AppName.ValueString(), "attach-post-deploy", plan.Networks.AttachPostDeploy.ValueString())
+			err := client.NetworkEnsureAndSetForApp(ctx, plan.AppName.ValueString(), "attach-post-deploy", plan.Networks.AttachPostDeploy.ValueString())
 			if err != nil {
 				resp.Diagnostics.AddAttributeError(path.Root("networks").AtName("attach_post_deploy"), "Unable to set network", "Unable to set network. "+err.Error())
 			}
 		}
 		if !plan.Networks.InitialNetwork.IsNull() {
-			err := r.client.NetworkEnsureAndSetForApp(ctx, plan.AppName.ValueString(), "initial_network", plan.Networks.InitialNetwork.ValueString())
+			err := client.NetworkEnsureAndSetForApp(ctx, plan.AppName.ValueString(), "initial_network", plan.Networks.InitialNetwork.ValueString())
 			if err != nil {
 				resp.Diagnostics.AddAttributeError(path.Root("networks").AtName("initial_network"), "Unable to set network", "Unable to set network. "+err.Error())
 			}
@@ -734,14 +759,14 @@ func (r *appResource) Create(ctx context.Context, req resource.CreateRequest, re
 	}
 
 	if plan.Deploy != nil && !resp.Diagnostics.HasError() {
-		_, err := r.deploy(ctx, plan.AppName.ValueString(), *plan.Deploy)
+		_, err := r.deploy(ctx, client, plan.AppName.ValueString(), *plan.Deploy)
 		if err != nil {
 			resp.Diagnostics.AddAttributeError(path.Root("deploy"), "Unable to deploy", "Unable to deploy. "+err.Error())
 		}
 	}
 
 	if resp.Diagnostics.HasError() {
-		err := r.client.AppDestroy(ctx, plan.AppName.ValueString())
+		err := client.AppDestroy(ctx, plan.AppName.ValueString())
 		if err != nil {
 			resp.Diagnostics.AddError("Unable to destroy app", "Unable to destroy app. "+err.Error())
 		}
@@ -777,6 +802,14 @@ func (r *appResource) Update(ctx context.Context, req resource.UpdateRequest, re
 		return
 	}
 	appName := plan.AppName.ValueString()
+
+	// Create SSH connection on-demand
+	client, err := r.config.NewClient(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("SSH connection failed", err.Error())
+		return
+	}
+	defer r.config.CloseClient(client)
 
 	restartRequired := false
 
@@ -818,7 +851,7 @@ func (r *appResource) Update(ctx context.Context, req resource.UpdateRequest, re
 		}
 	}
 	if len(namesToUnset) != 0 {
-		err := r.client.ConfigUnset(ctx, appName, namesToUnset)
+		err := client.ConfigUnset(ctx, appName, namesToUnset)
 		if err != nil {
 			resp.Diagnostics.AddAttributeError(path.Root("config"), "Unable to unset config", "Unable to unset config. "+err.Error())
 		}
@@ -834,7 +867,7 @@ func (r *appResource) Update(ctx context.Context, req resource.UpdateRequest, re
 		}
 	}
 	if len(configToSet) != 0 {
-		err := r.client.ConfigSet(ctx, appName, configToSet)
+		err := client.ConfigSet(ctx, appName, configToSet)
 		if err != nil {
 			resp.Diagnostics.AddAttributeError(path.Root("config"), "Unable to set config", "Unable to set config. "+err.Error())
 		}
@@ -850,24 +883,24 @@ func (r *appResource) Update(ctx context.Context, req resource.UpdateRequest, re
 				found = true
 
 				if !existingStorage.MountPath.Equal(planStorage.MountPath) {
-					err := r.client.StorageUnmount(ctx, appName, existingName, existingStorage.MountPath.ValueString())
+					err := client.StorageUnmount(ctx, appName, existingName, existingStorage.MountPath.ValueString())
 					if err != nil {
 						resp.Diagnostics.AddAttributeError(path.Root("storage").AtMapKey(existingName), "Unable to unmount storage", "Unable to unmount storage. "+err.Error())
 					}
 
-					err = r.client.StorageEnsure(ctx, planName, planStorage.LocalDirectory.ValueStringPointer())
+					err = client.StorageEnsure(ctx, planName, planStorage.LocalDirectory.ValueStringPointer())
 					if err != nil {
 						resp.Diagnostics.AddAttributeError(path.Root("storage").AtMapKey(existingName), "Unable to ensure storage", "Unable to ensure storage. "+err.Error())
 					}
 
-					err = r.client.StorageMount(ctx, appName, planName, planStorage.MountPath.ValueString())
+					err = client.StorageMount(ctx, appName, planName, planStorage.MountPath.ValueString())
 					if err != nil {
 						resp.Diagnostics.AddAttributeError(path.Root("storage").AtMapKey(existingName), "Unable to mount storage", "Unable to mount storage. "+err.Error())
 					}
 
 					restartRequired = true
 				} else if !planStorage.LocalDirectory.IsNull() {
-					err := r.client.StorageEnsure(ctx, planName, planStorage.LocalDirectory.ValueStringPointer())
+					err := client.StorageEnsure(ctx, planName, planStorage.LocalDirectory.ValueStringPointer())
 					if err != nil {
 						resp.Diagnostics.AddAttributeError(path.Root("storage").AtMapKey(existingName), "Unable to ensure storage", "Unable to ensure storage. "+err.Error())
 					}
@@ -879,7 +912,7 @@ func (r *appResource) Update(ctx context.Context, req resource.UpdateRequest, re
 			}
 		}
 		if !found {
-			err := r.client.StorageUnmount(ctx, appName, existingName, existingStorage.MountPath.ValueString())
+			err := client.StorageUnmount(ctx, appName, existingName, existingStorage.MountPath.ValueString())
 			if err != nil {
 				resp.Diagnostics.AddAttributeError(path.Root("storage").AtMapKey(existingName), "Unable to unmount storage", "Unable to unmount storage. "+err.Error())
 			}
@@ -896,12 +929,12 @@ func (r *appResource) Update(ctx context.Context, req resource.UpdateRequest, re
 			}
 		}
 		if !found {
-			err := r.client.StorageEnsure(ctx, planName, planStorage.LocalDirectory.ValueStringPointer())
+			err := client.StorageEnsure(ctx, planName, planStorage.LocalDirectory.ValueStringPointer())
 			if err != nil {
 				resp.Diagnostics.AddAttributeError(path.Root("storage").AtMapKey(planName), "Unable to ensure storage", "Unable to ensure storage. "+err.Error())
 			}
 
-			err = r.client.StorageMount(ctx, appName, planName, planStorage.MountPath.ValueString())
+			err = client.StorageMount(ctx, appName, planName, planStorage.MountPath.ValueString())
 			if err != nil {
 				resp.Diagnostics.AddAttributeError(path.Root("storage").AtMapKey(planName), "Unable to mount storage", "Unable to mount storage. "+err.Error())
 			}
@@ -921,7 +954,7 @@ func (r *appResource) Update(ctx context.Context, req resource.UpdateRequest, re
 		planCheckStatus = plan.Checks.Status.ValueString()
 	}
 	if stateCheckStatus != planCheckStatus {
-		err := r.client.ChecksSet(ctx, appName, planCheckStatus)
+		err := client.ChecksSet(ctx, appName, planCheckStatus)
 		if err != nil {
 			resp.Diagnostics.AddAttributeError(path.Root("checks"), "Unable to set checks", "Unable to set checks. "+err.Error())
 		}
@@ -996,22 +1029,22 @@ func (r *appResource) Update(ctx context.Context, req resource.UpdateRequest, re
 	}
 	if needToSetPorts {
 		if len(portsToSet) == 0 {
-			err := r.client.PortsClear(ctx, appName)
+			err := client.PortsClear(ctx, appName)
 			if err != nil {
 				resp.Diagnostics.AddAttributeError(path.Root("ports"), "Unable to clear ports", "Unable to clear ports. "+err.Error())
 			}
 
-			err = r.client.ProxyDisable(ctx, appName)
+			err = client.ProxyDisable(ctx, appName)
 			if err != nil {
 				resp.Diagnostics.AddAttributeError(path.Root("ports"), "Unable to disable ports", "Unable to disable ports. "+err.Error())
 			}
 		} else {
-			err := r.client.PortsSet(ctx, appName, portsToSet)
+			err := client.PortsSet(ctx, appName, portsToSet)
 			if err != nil {
 				resp.Diagnostics.AddAttributeError(path.Root("ports"), "Unable to set ports", "Unable to set ports. "+err.Error())
 			}
 
-			err = r.client.ProxyEnable(ctx, appName)
+			err = client.ProxyEnable(ctx, appName)
 			if err != nil {
 				resp.Diagnostics.AddAttributeError(path.Root("ports"), "Unable to enable ports", "Unable to enable ports. "+err.Error())
 			}
@@ -1074,22 +1107,22 @@ func (r *appResource) Update(ctx context.Context, req resource.UpdateRequest, re
 	if needToSetDomains {
 		var err error
 		if len(domainsToSet) == 0 {
-			err = r.client.DomainsDisable(ctx, appName)
+			err = client.DomainsDisable(ctx, appName)
 			if err != nil {
 				resp.Diagnostics.AddAttributeError(path.Root("domains"), "Unable to disable domains support", "Unable to disable domains support. "+err.Error())
 			}
 
-			err = r.client.DomainsClear(ctx, appName)
+			err = client.DomainsClear(ctx, appName)
 			if err != nil {
 				resp.Diagnostics.AddAttributeError(path.Root("domains"), "Unable to clear domains", "Unable to clear domains. "+err.Error())
 			}
 		} else {
-			err = r.client.DomainsEnable(ctx, appName)
+			err = client.DomainsEnable(ctx, appName)
 			if err != nil {
 				resp.Diagnostics.AddAttributeError(path.Root("domains"), "Unable to enable domains support", "Unable to enable domains support. "+err.Error())
 			}
 
-			err = r.client.DomainsSet(ctx, appName, domainsToSet)
+			err = client.DomainsSet(ctx, appName, domainsToSet)
 			if err != nil {
 				resp.Diagnostics.AddAttributeError(path.Root("domains"), "Unable to set domains", "Unable to set domains. "+err.Error())
 			}
@@ -1106,12 +1139,12 @@ func (r *appResource) Update(ctx context.Context, req resource.UpdateRequest, re
 				found = true
 
 				if !existingDockerOption.Phase.Equal(planDockerOption.Phase) {
-					err := r.client.DockerOptionRemove(ctx, appName, formatDockerOptionsPhases(existingDockerOption.Phase), existingValue)
+					err := client.DockerOptionRemove(ctx, appName, formatDockerOptionsPhases(existingDockerOption.Phase), existingValue)
 					if err != nil {
 						resp.Diagnostics.AddAttributeError(path.Root("storage").AtMapKey(existingValue), "Unable to remove docker option", "Unable to remove docker option. "+err.Error())
 					}
 
-					err = r.client.DockerOptionAdd(ctx, appName, formatDockerOptionsPhases(planDockerOption.Phase), planValue)
+					err = client.DockerOptionAdd(ctx, appName, formatDockerOptionsPhases(planDockerOption.Phase), planValue)
 					if err != nil {
 						resp.Diagnostics.AddAttributeError(path.Root("storage").AtMapKey(existingValue), "Unable to add docker option", "Unable to add docker option. "+err.Error())
 					}
@@ -1123,7 +1156,7 @@ func (r *appResource) Update(ctx context.Context, req resource.UpdateRequest, re
 			}
 		}
 		if !found {
-			err := r.client.DockerOptionRemove(ctx, appName, formatDockerOptionsPhases(existingDockerOption.Phase), existingValue)
+			err := client.DockerOptionRemove(ctx, appName, formatDockerOptionsPhases(existingDockerOption.Phase), existingValue)
 			if err != nil {
 				resp.Diagnostics.AddAttributeError(path.Root("docker_options").AtMapKey(existingValue), "Unable to remove docker option", "Unable to remove docker option. "+err.Error())
 			}
@@ -1140,7 +1173,7 @@ func (r *appResource) Update(ctx context.Context, req resource.UpdateRequest, re
 			}
 		}
 		if !found {
-			err := r.client.DockerOptionAdd(ctx, appName, formatDockerOptionsPhases(planDockerOption.Phase), planValue)
+			err := client.DockerOptionAdd(ctx, appName, formatDockerOptionsPhases(planDockerOption.Phase), planValue)
 			if err != nil {
 				resp.Diagnostics.AddAttributeError(path.Root("docker_options").AtMapKey(planValue), "Unable to add docker option", "Unable to add docker option. "+err.Error())
 			}
@@ -1154,38 +1187,38 @@ func (r *appResource) Update(ctx context.Context, req resource.UpdateRequest, re
 	if state.Networks != nil {
 		if plan.Networks != nil {
 			if !plan.Networks.AttachPostCreate.Equal(state.Networks.AttachPostCreate) {
-				err := r.client.NetworkEnsureAndSetForApp(ctx, appName, "attach-post-create", plan.Networks.AttachPostCreate.ValueString())
+				err := client.NetworkEnsureAndSetForApp(ctx, appName, "attach-post-create", plan.Networks.AttachPostCreate.ValueString())
 				if err != nil {
 					resp.Diagnostics.AddAttributeError(path.Root("networks").AtName("attach_post_create"), "Unable to set network", "Unable to set network. "+err.Error())
 				}
 			}
 			if !plan.Networks.AttachPostDeploy.Equal(state.Networks.AttachPostDeploy) {
-				err := r.client.NetworkEnsureAndSetForApp(ctx, appName, "attach-post-deploy", plan.Networks.AttachPostDeploy.ValueString())
+				err := client.NetworkEnsureAndSetForApp(ctx, appName, "attach-post-deploy", plan.Networks.AttachPostDeploy.ValueString())
 				if err != nil {
 					resp.Diagnostics.AddAttributeError(path.Root("networks").AtName("attach_post_deploy"), "Unable to set network", "Unable to set network. "+err.Error())
 				}
 			}
 			if !plan.Networks.InitialNetwork.Equal(state.Networks.InitialNetwork) {
-				err := r.client.NetworkEnsureAndSetForApp(ctx, appName, "initial-network", plan.Networks.InitialNetwork.ValueString())
+				err := client.NetworkEnsureAndSetForApp(ctx, appName, "initial-network", plan.Networks.InitialNetwork.ValueString())
 				if err != nil {
 					resp.Diagnostics.AddAttributeError(path.Root("networks").AtName("initial_network"), "Unable to set network", "Unable to set network. "+err.Error())
 				}
 			}
 		} else {
 			if !state.Networks.AttachPostCreate.IsNull() {
-				err := r.client.NetworkUnsetForApp(ctx, appName, "attach-post-create")
+				err := client.NetworkUnsetForApp(ctx, appName, "attach-post-create")
 				if err != nil {
 					resp.Diagnostics.AddAttributeError(path.Root("networks").AtName("attach_post_create"), "Unable to unset network", "Unable to unset network. "+err.Error())
 				}
 			}
 			if !state.Networks.AttachPostDeploy.IsNull() {
-				err := r.client.NetworkUnsetForApp(ctx, appName, "attach-post-deploy")
+				err := client.NetworkUnsetForApp(ctx, appName, "attach-post-deploy")
 				if err != nil {
 					resp.Diagnostics.AddAttributeError(path.Root("networks").AtName("attach_post_deploy"), "Unable to unset network", "Unable to unset network. "+err.Error())
 				}
 			}
 			if !state.Networks.InitialNetwork.IsNull() {
-				err := r.client.NetworkUnsetForApp(ctx, appName, "initial-network")
+				err := client.NetworkUnsetForApp(ctx, appName, "initial-network")
 				if err != nil {
 					resp.Diagnostics.AddAttributeError(path.Root("networks").AtName("initial_network"), "Unable to unset network", "Unable to unset network. "+err.Error())
 				}
@@ -1194,19 +1227,19 @@ func (r *appResource) Update(ctx context.Context, req resource.UpdateRequest, re
 	} else {
 		if plan.Networks != nil {
 			if !plan.Networks.AttachPostCreate.IsNull() {
-				err := r.client.NetworkEnsureAndSetForApp(ctx, appName, "attach-post-create", plan.Networks.AttachPostCreate.ValueString())
+				err := client.NetworkEnsureAndSetForApp(ctx, appName, "attach-post-create", plan.Networks.AttachPostCreate.ValueString())
 				if err != nil {
 					resp.Diagnostics.AddAttributeError(path.Root("networks").AtName("attach_post_create"), "Unable to set network", "Unable to set network. "+err.Error())
 				}
 			}
 			if !plan.Networks.AttachPostDeploy.IsNull() {
-				err := r.client.NetworkEnsureAndSetForApp(ctx, appName, "attach-post-deploy", plan.Networks.AttachPostDeploy.ValueString())
+				err := client.NetworkEnsureAndSetForApp(ctx, appName, "attach-post-deploy", plan.Networks.AttachPostDeploy.ValueString())
 				if err != nil {
 					resp.Diagnostics.AddAttributeError(path.Root("networks").AtName("attach_post_deploy"), "Unable to set network", "Unable to set network. "+err.Error())
 				}
 			}
 			if !plan.Networks.InitialNetwork.IsNull() {
-				err := r.client.NetworkEnsureAndSetForApp(ctx, appName, "initial-network", plan.Networks.InitialNetwork.ValueString())
+				err := client.NetworkEnsureAndSetForApp(ctx, appName, "initial-network", plan.Networks.InitialNetwork.ValueString())
 				if err != nil {
 					resp.Diagnostics.AddAttributeError(path.Root("networks").AtName("initial_network"), "Unable to set network", "Unable to set network. "+err.Error())
 				}
@@ -1217,7 +1250,7 @@ func (r *appResource) Update(ctx context.Context, req resource.UpdateRequest, re
 
 	// -- deploy
 	if plan.Deploy != nil {
-		deployed, err := r.deploy(ctx, plan.AppName.ValueString(), *plan.Deploy)
+		deployed, err := r.deploy(ctx, client, plan.AppName.ValueString(), *plan.Deploy)
 		if err != nil {
 			resp.Diagnostics.AddAttributeError(path.Root("deploy"), "Unable to deploy", "Unable to deploy. "+err.Error())
 		}
@@ -1228,7 +1261,7 @@ func (r *appResource) Update(ctx context.Context, req resource.UpdateRequest, re
 	// --
 
 	if !resp.Diagnostics.HasError() && restartRequired {
-		err := r.client.ProcessRestart(ctx, appName)
+		err := client.ProcessRestart(ctx, appName)
 		if err != nil {
 			resp.Diagnostics.AddError("Unable to restart process", "Unable to restart process. "+err.Error())
 		}
@@ -1254,7 +1287,15 @@ func (r *appResource) Delete(ctx context.Context, req resource.DeleteRequest, re
 		return
 	}
 
-	exists, err := r.client.AppExists(ctx, state.AppName.ValueString())
+	// Create SSH connection on-demand
+	client, err := r.config.NewClient(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("SSH connection failed", err.Error())
+		return
+	}
+	defer r.config.CloseClient(client)
+
+	exists, err := client.AppExists(ctx, state.AppName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddAttributeError(path.Root("app_name"), "Unable to check app existence", "Unable to check app existence. "+err.Error())
 		return
@@ -1264,7 +1305,7 @@ func (r *appResource) Delete(ctx context.Context, req resource.DeleteRequest, re
 	}
 
 	// Delete existing app
-	err = r.client.AppDestroy(ctx, state.AppName.ValueString())
+	err = client.AppDestroy(ctx, state.AppName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to destroy app", "Unable to destroy app. "+err.Error())
 		return
@@ -1276,10 +1317,10 @@ func (r *appResource) ImportState(ctx context.Context, req resource.ImportStateR
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("app_name"), req.ID)...)
 }
 
-func (r *appResource) deploy(ctx context.Context, appName string, deployModel deployModel) (deployed bool, err error) {
+func (r *appResource) deploy(ctx context.Context, client *dokkuclient.Client, appName string, deployModel deployModel) (deployed bool, err error) {
 	switch deployModel.Type.ValueString() {
 	case "archive":
-		err = r.client.DeployFromArchive(ctx, appName, deployModel.ArchiveType.ValueString(), deployModel.ArchiveUrl.ValueString())
+		err = client.DeployFromArchive(ctx, appName, deployModel.ArchiveType.ValueString(), deployModel.ArchiveUrl.ValueString())
 		deployed = err == nil
 	case "docker_image":
 		if !deployModel.Login.IsNull() && !deployModel.Password.IsNull() {
@@ -1287,26 +1328,26 @@ func (r *appResource) deploy(ctx context.Context, appName string, deployModel de
 			if err != nil {
 				return false, fmt.Errorf("unable to parse url: %w", err)
 			}
-			err = r.client.RegistryLogin(ctx, u.Host, deployModel.Login.ValueString(), deployModel.Password.ValueString())
+			err = client.RegistryLogin(ctx, u.Host, deployModel.Login.ValueString(), deployModel.Password.ValueString())
 			if err != nil {
 				return false, fmt.Errorf("unable to login to registry: %w", err)
 			}
 		}
 
-		deployed, err = r.client.DeployFromImage(ctx, appName, deployModel.DockerImage.ValueString(), deployModel.AllowRebuild.ValueBool())
+		deployed, err = client.DeployFromImage(ctx, appName, deployModel.DockerImage.ValueString(), deployModel.AllowRebuild.ValueBool())
 	case "git_repository":
 		if !deployModel.Login.IsNull() && !deployModel.Password.IsNull() {
 			u, err := url.Parse(deployModel.GitRepository.ValueString())
 			if err != nil {
 				return false, fmt.Errorf("unable to parse url: %w", err)
 			}
-			err = r.client.GitAuth(ctx, u.Host, deployModel.Login.ValueString(), deployModel.Password.ValueString())
+			err = client.GitAuth(ctx, u.Host, deployModel.Login.ValueString(), deployModel.Password.ValueString())
 			if err != nil {
 				return false, fmt.Errorf("unable to login to git: %w", err)
 			}
 		}
 
-		err = r.client.DeploySyncRepository(ctx, appName, deployModel.GitRepository.ValueString(), deployModel.GitRepositoryRef.ValueString())
+		err = client.DeploySyncRepository(ctx, appName, deployModel.GitRepository.ValueString(), deployModel.GitRepositoryRef.ValueString())
 		deployed = err == nil
 	default:
 		err = fmt.Errorf("Unknown deploy type %s", deployModel.Type.ValueString())

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"regexp"
 
-	dokkuclient "github.com/aliksend/terraform-provider-dokku/provider/dokku_client"
+	"github.com/aliksend/terraform-provider-dokku/internal/config"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/path"
@@ -29,7 +29,7 @@ func NewElasticsearchResource() resource.Resource {
 }
 
 type elasticsearchResource struct {
-	client *dokkuclient.Client
+	config *config.DokkuConfig
 }
 
 type elasticsearchResourceModel struct {
@@ -43,14 +43,22 @@ func (r *elasticsearchResource) Metadata(_ context.Context, req resource.Metadat
 	resp.TypeName = req.ProviderTypeName + "_elasticsearch"
 }
 
-// Configure adds the provider configured client to the resource.
-func (r *elasticsearchResource) Configure(_ context.Context, req resource.ConfigureRequest, _ *resource.ConfigureResponse) {
+// Configure adds the provider configured config to the resource.
+func (r *elasticsearchResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
 	if req.ProviderData == nil {
 		return
 	}
 
-	//nolint:forcetypeassert
-	r.client = req.ProviderData.(*dokkuclient.Client)
+	config, ok := req.ProviderData.(*config.DokkuConfig)
+	if !ok {
+		resp.Diagnostics.AddError(
+			"Unexpected Resource Configure Type",
+			fmt.Sprintf("Expected *config.DokkuConfig, got: %T", req.ProviderData),
+		)
+		return
+	}
+
+	r.config = config
 }
 
 // Schema defines the schema for the resource.
@@ -99,8 +107,16 @@ func (r *elasticsearchResource) Read(ctx context.Context, req resource.ReadReque
 		return
 	}
 
+	// Create SSH connection on-demand
+	client, err := r.config.NewClient(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("SSH connection failed", err.Error())
+		return
+	}
+	defer r.config.CloseClient(client)
+
 	// Check service existence
-	exists, err := r.client.SimpleServiceExists(ctx, "elasticsearch", state.ServiceName.ValueString())
+	exists, err := client.SimpleServiceExists(ctx, "elasticsearch", state.ServiceName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to check elasticsearch service existence", "Unable to check elasticsearch service existence. "+err.Error())
 		return
@@ -110,7 +126,7 @@ func (r *elasticsearchResource) Read(ctx context.Context, req resource.ReadReque
 		return
 	}
 
-	info, err := r.client.SimpleServiceInfo(ctx, "elasticsearch", state.ServiceName.ValueString())
+	info, err := client.SimpleServiceInfo(ctx, "elasticsearch", state.ServiceName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to get elasticsearch service info", "Unable to get elasticsearch service info. "+err.Error())
 		return
@@ -149,8 +165,16 @@ func (r *elasticsearchResource) Create(ctx context.Context, req resource.CreateR
 		return
 	}
 
+	// Create SSH connection on-demand
+	client, err := r.config.NewClient(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("SSH connection failed", err.Error())
+		return
+	}
+	defer r.config.CloseClient(client)
+
 	// Create service is not exists
-	exists, err := r.client.SimpleServiceExists(ctx, "elasticsearch", plan.ServiceName.ValueString())
+	exists, err := client.SimpleServiceExists(ctx, "elasticsearch", plan.ServiceName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to check elasticsearch service existence", "Unable to check elasticsearch service existence. "+err.Error())
 		return
@@ -172,14 +196,14 @@ func (r *elasticsearchResource) Create(ctx context.Context, req resource.CreateR
 		}
 	}
 
-	err = r.client.SimpleServiceCreate(ctx, "elasticsearch", plan.ServiceName.ValueString())
+	err = client.SimpleServiceCreate(ctx, "elasticsearch", plan.ServiceName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to create elasticsearch service", "Unable to create elasticsearch service. "+err.Error())
 		return
 	}
 
 	if !plan.Expose.IsNull() {
-		err := r.client.SimpleServiceExpose(ctx, "elasticsearch", plan.ServiceName.ValueString(), plan.Expose.ValueString())
+		err := client.SimpleServiceExpose(ctx, "elasticsearch", plan.ServiceName.ValueString(), plan.Expose.ValueString())
 		if err != nil {
 			resp.Diagnostics.AddError("Unable to expose elasticsearch service", "Unable to expose elasticsearch service. "+err.Error())
 			return
@@ -210,26 +234,34 @@ func (r *elasticsearchResource) Update(ctx context.Context, req resource.UpdateR
 		return
 	}
 
+	// Create SSH connection on-demand
+	client, err := r.config.NewClient(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("SSH connection failed", err.Error())
+		return
+	}
+	defer r.config.CloseClient(client)
+
 	if plan.ServiceName.ValueString() != state.ServiceName.ValueString() {
 		resp.Diagnostics.AddError("service_name can't be changed", "service_name can't be changed")
 	}
 
 	if !plan.Expose.IsNull() {
 		if !plan.Expose.Equal(state.Expose) {
-			err := r.client.SimpleServiceUnexpose(ctx, "elasticsearch", state.ServiceName.ValueString())
+			err := client.SimpleServiceUnexpose(ctx, "elasticsearch", state.ServiceName.ValueString())
 			if err != nil {
 				resp.Diagnostics.AddError("Unable to unexpose elasticsearch service", "Unable to unexpose elasticsearch service. "+err.Error())
 				return
 			}
 
-			err = r.client.SimpleServiceExpose(ctx, "elasticsearch", plan.ServiceName.ValueString(), plan.Expose.ValueString())
+			err = client.SimpleServiceExpose(ctx, "elasticsearch", plan.ServiceName.ValueString(), plan.Expose.ValueString())
 			if err != nil {
 				resp.Diagnostics.AddError("Unable to expose elasticsearch service", "Unable to expose elasticsearch service. "+err.Error())
 				return
 			}
 		}
 	} else if !state.Expose.IsNull() {
-		err := r.client.SimpleServiceUnexpose(ctx, "elasticsearch", state.ServiceName.ValueString())
+		err := client.SimpleServiceUnexpose(ctx, "elasticsearch", state.ServiceName.ValueString())
 		if err != nil {
 			resp.Diagnostics.AddError("Unable to unexpose elasticsearch service", "Unable to unexpose elasticsearch service. "+err.Error())
 			return
@@ -257,8 +289,16 @@ func (r *elasticsearchResource) Delete(ctx context.Context, req resource.DeleteR
 		return
 	}
 
+	// Create SSH connection on-demand
+	client, err := r.config.NewClient(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("SSH connection failed", err.Error())
+		return
+	}
+	defer r.config.CloseClient(client)
+
 	// Check service existence
-	exists, err := r.client.SimpleServiceExists(ctx, "elasticsearch", state.ServiceName.ValueString())
+	exists, err := client.SimpleServiceExists(ctx, "elasticsearch", state.ServiceName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to check elasticsearch service existence", "Unable to check elasticsearch service existence. "+err.Error())
 		return
@@ -268,7 +308,7 @@ func (r *elasticsearchResource) Delete(ctx context.Context, req resource.DeleteR
 	}
 
 	// Destroy instance
-	err = r.client.SimpleServiceDestroy(ctx, "elasticsearch", state.ServiceName.ValueString())
+	err = client.SimpleServiceDestroy(ctx, "elasticsearch", state.ServiceName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to destroy service", "Unable to destroy service. "+err.Error())
 		return

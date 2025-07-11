@@ -5,8 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	dokkuclient "github.com/aliksend/terraform-provider-dokku/provider/dokku_client"
-
+	"github.com/aliksend/terraform-provider-dokku/internal/config"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -27,7 +26,7 @@ func NewPluginResource() resource.Resource {
 }
 
 type pluginResource struct {
-	client *dokkuclient.Client
+	config *config.DokkuConfig
 }
 
 type pluginResourceModel struct {
@@ -41,13 +40,21 @@ func (r *pluginResource) Metadata(_ context.Context, req resource.MetadataReques
 }
 
 // Configure adds the provider configured client to the resource.
-func (r *pluginResource) Configure(_ context.Context, req resource.ConfigureRequest, _ *resource.ConfigureResponse) {
+func (r *pluginResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
 	if req.ProviderData == nil {
 		return
 	}
 
-	//nolint:forcetypeassert
-	r.client = req.ProviderData.(*dokkuclient.Client)
+	config, ok := req.ProviderData.(*config.DokkuConfig)
+	if !ok {
+		resp.Diagnostics.AddError(
+			"Unexpected Resource Configure Type",
+			fmt.Sprintf("Expected *config.DokkuConfig, got: %T", req.ProviderData),
+		)
+		return
+	}
+
+	r.config = config
 }
 
 // Schema defines the schema for the resource.
@@ -94,8 +101,16 @@ func (r *pluginResource) Read(ctx context.Context, req resource.ReadRequest, res
 		return
 	}
 
+	// Create SSH connection on-demand
+	client, err := r.config.NewClient(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("SSH connection failed", err.Error())
+		return
+	}
+	defer r.config.CloseClient(client)
+
 	// Read plugin
-	found, err := r.client.PluginIsInstalled(ctx, state.Name.ValueString())
+	found, err := client.PluginIsInstalled(ctx, state.Name.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to read plugin", "Unable to read plugin. "+err.Error())
 		return
@@ -123,9 +138,17 @@ func (r *pluginResource) Create(ctx context.Context, req resource.CreateRequest,
 		return
 	}
 
+	// Create SSH connection on-demand
+	client, err := r.config.NewClient(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("SSH connection failed", err.Error())
+		return
+	}
+	defer r.config.CloseClient(client)
+
 	// Can't install the plugin because it requires root rights
 	// Therefore, simply check that the plugin is installed and, if it is not, throw an error
-	found, err := r.client.PluginIsInstalled(ctx, plan.Name.ValueString())
+	found, err := client.PluginIsInstalled(ctx, plan.Name.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to read plugin", "Unable to read plugin. "+err.Error())
 	}

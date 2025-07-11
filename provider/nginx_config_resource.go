@@ -2,11 +2,11 @@ package provider
 
 import (
 	"context"
+	"fmt"
 	"regexp"
 	"strings"
 
-	dokkuclient "github.com/aliksend/terraform-provider-dokku/provider/dokku_client"
-
+	"github.com/aliksend/terraform-provider-dokku/internal/config"
 	"github.com/hashicorp/terraform-plugin-framework-validators/mapvalidator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/path"
@@ -30,7 +30,7 @@ func NewNginxConfigResource() resource.Resource {
 }
 
 type nginxConfigResource struct {
-	client *dokkuclient.Client
+	config *config.DokkuConfig
 }
 
 type nginxConfigResourceModel struct {
@@ -44,14 +44,22 @@ func (r *nginxConfigResource) Metadata(_ context.Context, req resource.MetadataR
 	resp.TypeName = req.ProviderTypeName + "_nginx_config"
 }
 
-// Configure adds the provider configured client to the resource.
-func (r *nginxConfigResource) Configure(_ context.Context, req resource.ConfigureRequest, _ *resource.ConfigureResponse) {
+// Configure adds the provider configured config to the resource.
+func (r *nginxConfigResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
 	if req.ProviderData == nil {
 		return
 	}
 
-	//nolint:forcetypeassert
-	r.client = req.ProviderData.(*dokkuclient.Client)
+	config, ok := req.ProviderData.(*config.DokkuConfig)
+	if !ok {
+		resp.Diagnostics.AddError(
+			"Unexpected Resource Configure Type",
+			fmt.Sprintf("Expected *config.DokkuConfig, got: %T", req.ProviderData),
+		)
+		return
+	}
+
+	r.config = config
 }
 
 // Schema defines the schema for the resource.
@@ -128,9 +136,17 @@ func (r *nginxConfigResource) Read(ctx context.Context, req resource.ReadRequest
 		return
 	}
 
+	// Create SSH connection on-demand
+	client, err := r.config.NewClient(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("SSH connection failed", err.Error())
+		return
+	}
+	defer r.config.CloseClient(client)
+
 	// Read
 	for property := range state.Config {
-		value, err := r.client.NginxConfigGetValue(ctx, appName, property)
+		value, err := client.NginxConfigGetValue(ctx, appName, property)
 		if err != nil {
 			resp.Diagnostics.AddError("Unable to read nginxConfig property"+property, "Unable to read nginxConfig property"+property+". "+err.Error())
 			return
@@ -165,16 +181,24 @@ func (r *nginxConfigResource) Create(ctx context.Context, req resource.CreateReq
 		return
 	}
 
+	// Create SSH connection on-demand
+	client, err := r.config.NewClient(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("SSH connection failed", err.Error())
+		return
+	}
+	defer r.config.CloseClient(client)
+
 	// Create
 	for property := range plan.Config {
-		err := r.client.NginxConfigSetValue(ctx, appName, property, plan.Config[property].ValueString())
+		err := client.NginxConfigSetValue(ctx, appName, property, plan.Config[property].ValueString())
 		if err != nil {
 			resp.Diagnostics.AddError("Unable to set nginxConfig property", "Unable to set nginxConfig property. "+err.Error())
 			return
 		}
 	}
 
-	err := r.client.ProxyBuildConfig(ctx, appName)
+	err = client.ProxyBuildConfig(ctx, appName)
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to rebuild nginxConfig for app", "Unable to rebuild nginxConfig for app. "+err.Error())
 		return
@@ -213,10 +237,18 @@ func (r *nginxConfigResource) Update(ctx context.Context, req resource.UpdateReq
 		return
 	}
 
+	// Create SSH connection on-demand
+	client, err := r.config.NewClient(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("SSH connection failed", err.Error())
+		return
+	}
+	defer r.config.CloseClient(client)
+
 	// Update
 	var updatedProperties []string
 	for property := range plan.Config {
-		err := r.client.NginxConfigSetValue(ctx, appName, property, plan.Config[property].ValueString())
+		err := client.NginxConfigSetValue(ctx, appName, property, plan.Config[property].ValueString())
 		if err != nil {
 			resp.Diagnostics.AddError("Unable to set nginxConfig property", "Unable to set nginxConfig property. "+err.Error())
 			return
@@ -232,7 +264,7 @@ func (r *nginxConfigResource) Update(ctx context.Context, req resource.UpdateReq
 			}
 		}
 		if !presentInPlan {
-			err := r.client.NginxConfigResetValue(ctx, appName, property)
+			err := client.NginxConfigResetValue(ctx, appName, property)
 			if err != nil {
 				resp.Diagnostics.AddError("Unable to reset nginxConfig property", "Unable to reset nginxConfig property. "+err.Error())
 				return
@@ -240,7 +272,7 @@ func (r *nginxConfigResource) Update(ctx context.Context, req resource.UpdateReq
 		}
 	}
 
-	err := r.client.ProxyBuildConfig(ctx, appName)
+	err = client.ProxyBuildConfig(ctx, appName)
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to rebuild nginxConfig for app", "Unable to rebuild nginxConfig for app. "+err.Error())
 		return
@@ -276,15 +308,23 @@ func (r *nginxConfigResource) Delete(ctx context.Context, req resource.DeleteReq
 		return
 	}
 
+	// Create SSH connection on-demand
+	client, err := r.config.NewClient(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("SSH connection failed", err.Error())
+		return
+	}
+	defer r.config.CloseClient(client)
+
 	for property := range state.Config {
-		err := r.client.NginxConfigResetValue(ctx, appName, property)
+		err := client.NginxConfigResetValue(ctx, appName, property)
 		if err != nil {
 			resp.Diagnostics.AddError("Unable to reset nginxConfig property", "Unable to reset nginxConfig property. "+err.Error())
 			return
 		}
 	}
 
-	err := r.client.ProxyBuildConfig(ctx, appName)
+	err = client.ProxyBuildConfig(ctx, appName)
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to rebuild nginxConfig for app", "Unable to rebuild nginxConfig for app. "+err.Error())
 		return

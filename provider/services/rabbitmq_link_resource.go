@@ -2,9 +2,11 @@ package services
 
 import (
 	"context"
+	"fmt"
 	"regexp"
 	"strings"
 
+	"github.com/aliksend/terraform-provider-dokku/internal/config"
 	dokkuclient "github.com/aliksend/terraform-provider-dokku/provider/dokku_client"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
@@ -28,7 +30,7 @@ func NewRabbitMQLinkResource() resource.Resource {
 }
 
 type rabbitMQLinkResource struct {
-	client *dokkuclient.Client
+	config *config.DokkuConfig
 }
 
 type rabbitMQLinkResourceModel struct {
@@ -42,14 +44,22 @@ func (r *rabbitMQLinkResource) Metadata(_ context.Context, req resource.Metadata
 	resp.TypeName = req.ProviderTypeName + "_rabbitmq_link"
 }
 
-// Configure adds the provider configured client to the resource.
-func (r *rabbitMQLinkResource) Configure(_ context.Context, req resource.ConfigureRequest, _ *resource.ConfigureResponse) {
+// Configure adds the provider configured config to the resource.
+func (r *rabbitMQLinkResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
 	if req.ProviderData == nil {
 		return
 	}
 
-	//nolint:forcetypeassert
-	r.client = req.ProviderData.(*dokkuclient.Client)
+	config, ok := req.ProviderData.(*config.DokkuConfig)
+	if !ok {
+		resp.Diagnostics.AddError(
+			"Unexpected Resource Configure Type",
+			fmt.Sprintf("Expected *config.DokkuConfig, got: %T", req.ProviderData),
+		)
+		return
+	}
+
+	r.config = config
 }
 
 // Schema defines the schema for the resource.
@@ -100,8 +110,16 @@ func (r *rabbitMQLinkResource) Read(ctx context.Context, req resource.ReadReques
 		return
 	}
 
+	// Create SSH connection on-demand
+	client, err := r.config.NewClient(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("SSH connection failed", err.Error())
+		return
+	}
+	defer r.config.CloseClient(client)
+
 	// Check service existence
-	exists, err := r.client.SimpleServiceExists(ctx, "rabbitmq", state.ServiceName.ValueString())
+	exists, err := client.SimpleServiceExists(ctx, "rabbitmq", state.ServiceName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to check rabbitMQ service existence", "Unable to check rabbitMQ service existence. "+err.Error())
 		return
@@ -112,7 +130,7 @@ func (r *rabbitMQLinkResource) Read(ctx context.Context, req resource.ReadReques
 	}
 
 	// Check link existence
-	exists, err = r.client.SimpleServiceLinkExists(ctx, "rabbitmq", state.ServiceName.ValueString(), state.AppName.ValueString())
+	exists, err = client.SimpleServiceLinkExists(ctx, "rabbitmq", state.ServiceName.ValueString(), state.AppName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to check rabbitMQ link existence", "Unable to check rabbitMQ link existence. "+err.Error())
 		return
@@ -140,8 +158,16 @@ func (r *rabbitMQLinkResource) Create(ctx context.Context, req resource.CreateRe
 		return
 	}
 
+	// Create SSH connection on-demand
+	client, err := r.config.NewClient(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("SSH connection failed", err.Error())
+		return
+	}
+	defer r.config.CloseClient(client)
+
 	// Check service existence
-	exists, err := r.client.SimpleServiceExists(ctx, "rabbitmq", plan.ServiceName.ValueString())
+	exists, err := client.SimpleServiceExists(ctx, "rabbitmq", plan.ServiceName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to check rabbitMQ service existence", "Unable to check rabbitMQ service existence. "+err.Error())
 		return
@@ -152,7 +178,7 @@ func (r *rabbitMQLinkResource) Create(ctx context.Context, req resource.CreateRe
 	}
 
 	// Check link existence
-	exists, err = r.client.SimpleServiceLinkExists(ctx, "rabbitmq", plan.ServiceName.ValueString(), plan.AppName.ValueString())
+	exists, err = client.SimpleServiceLinkExists(ctx, "rabbitmq", plan.ServiceName.ValueString(), plan.AppName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to check rabbitMQ link existence", "Unable to check rabbitMQ link existence. "+err.Error())
 		return
@@ -168,7 +194,7 @@ func (r *rabbitMQLinkResource) Create(ctx context.Context, req resource.CreateRe
 	}
 
 	// Create link
-	err = r.client.SimpleServiceLinkCreate(ctx, "rabbitmq", plan.ServiceName.ValueString(), plan.AppName.ValueString(), args...)
+	err = client.SimpleServiceLinkCreate(ctx, "rabbitmq", plan.ServiceName.ValueString(), plan.AppName.ValueString(), args...)
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to create rabbitMQ link", "Unable to create rabbitMQ link. "+err.Error())
 		return
@@ -197,8 +223,16 @@ func (r *rabbitMQLinkResource) Delete(ctx context.Context, req resource.DeleteRe
 		return
 	}
 
+	// Create SSH connection on-demand
+	client, err := r.config.NewClient(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("SSH connection failed", err.Error())
+		return
+	}
+	defer r.config.CloseClient(client)
+
 	// Check service existence
-	exists, err := r.client.SimpleServiceExists(ctx, "rabbitmq", state.ServiceName.ValueString())
+	exists, err := client.SimpleServiceExists(ctx, "rabbitmq", state.ServiceName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to check rabbitMQ service existence", "Unable to check rabbitMQ service existence. "+err.Error())
 		return
@@ -208,7 +242,7 @@ func (r *rabbitMQLinkResource) Delete(ctx context.Context, req resource.DeleteRe
 	}
 
 	// Check link existence
-	exists, err = r.client.SimpleServiceLinkExists(ctx, "rabbitmq", state.ServiceName.ValueString(), state.AppName.ValueString())
+	exists, err = client.SimpleServiceLinkExists(ctx, "rabbitmq", state.ServiceName.ValueString(), state.AppName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to check rabbitMQ link existence", "Unable to check rabbitMQ link existence. "+err.Error())
 		return
@@ -218,7 +252,7 @@ func (r *rabbitMQLinkResource) Delete(ctx context.Context, req resource.DeleteRe
 	}
 
 	// Unlink service
-	err = r.client.SimpleServiceLinkRemove(ctx, "rabbitmq", state.ServiceName.ValueString(), state.AppName.ValueString())
+	err = client.SimpleServiceLinkRemove(ctx, "rabbitmq", state.ServiceName.ValueString(), state.AppName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to unlink service from app", "Unable to unlink service from app. "+err.Error())
 		return

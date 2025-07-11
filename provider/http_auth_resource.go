@@ -2,11 +2,11 @@ package provider
 
 import (
 	"context"
+	"fmt"
 	"regexp"
 	"strings"
 
-	dokkuclient "github.com/aliksend/terraform-provider-dokku/provider/dokku_client"
-
+	"github.com/aliksend/terraform-provider-dokku/internal/config"
 	"github.com/hashicorp/terraform-plugin-framework-validators/mapvalidator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/path"
@@ -30,7 +30,7 @@ func NewHttpAuthResource() resource.Resource {
 }
 
 type httpAuthResource struct {
-	client *dokkuclient.Client
+	config *config.DokkuConfig
 }
 
 type httpAuthResourceModel struct {
@@ -47,14 +47,22 @@ func (r *httpAuthResource) Metadata(_ context.Context, req resource.MetadataRequ
 	resp.TypeName = req.ProviderTypeName + "_http_auth"
 }
 
-// Configure adds the provider configured client to the resource.
-func (r *httpAuthResource) Configure(_ context.Context, req resource.ConfigureRequest, _ *resource.ConfigureResponse) {
+// Configure adds the provider configured config to the resource.
+func (r *httpAuthResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
 	if req.ProviderData == nil {
 		return
 	}
 
-	//nolint:forcetypeassert
-	r.client = req.ProviderData.(*dokkuclient.Client)
+	config, ok := req.ProviderData.(*config.DokkuConfig)
+	if !ok {
+		resp.Diagnostics.AddError(
+			"Unexpected Resource Configure Type",
+			fmt.Sprintf("Expected *config.DokkuConfig, got: %T", req.ProviderData),
+		)
+		return
+	}
+
+	r.config = config
 }
 
 // Schema defines the schema for the resource.
@@ -108,8 +116,16 @@ func (r *httpAuthResource) Read(ctx context.Context, req resource.ReadRequest, r
 		return
 	}
 
+	// Create SSH connection on-demand
+	client, err := r.config.NewClient(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("SSH connection failed", err.Error())
+		return
+	}
+	defer r.config.CloseClient(client)
+
 	// Check http auth enabled
-	enabled, existingUsers, err := r.client.HttpAuthReport(ctx, state.AppName.ValueString())
+	enabled, existingUsers, err := client.HttpAuthReport(ctx, state.AppName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to check http auth enabled", "Unable to check http auth enabled. "+err.Error())
 		return
@@ -150,7 +166,15 @@ func (r *httpAuthResource) Create(ctx context.Context, req resource.CreateReques
 		return
 	}
 
-	enabled, existingUsers, err := r.client.HttpAuthReport(ctx, plan.AppName.ValueString())
+	// Create SSH connection on-demand
+	client, err := r.config.NewClient(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("SSH connection failed", err.Error())
+		return
+	}
+	defer r.config.CloseClient(client)
+
+	enabled, existingUsers, err := client.HttpAuthReport(ctx, plan.AppName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to check http auth enabled", "Unable to check http auth enabled. "+err.Error())
 		return
@@ -160,7 +184,7 @@ func (r *httpAuthResource) Create(ctx context.Context, req resource.CreateReques
 		return
 	}
 
-	err = r.client.HttpAuthEnable(ctx, plan.AppName.ValueString())
+	err = client.HttpAuthEnable(ctx, plan.AppName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to enable http-auth", "Unable to enable http-auth. "+err.Error())
 		return
@@ -168,21 +192,21 @@ func (r *httpAuthResource) Create(ctx context.Context, req resource.CreateReques
 
 	// remove all users if present
 	for _, u := range existingUsers {
-		err := r.client.HttpAuthRemoveUser(ctx, plan.AppName.ValueString(), u)
+		err := client.HttpAuthRemoveUser(ctx, plan.AppName.ValueString(), u)
 		if err != nil {
 			resp.Diagnostics.AddError("Unable to remove user", "Unable to remove user. "+err.Error())
 		}
 	}
 
 	for user, userData := range plan.Users {
-		err := r.client.HttpAuthAddUser(ctx, plan.AppName.ValueString(), user, userData.Password.ValueString())
+		err := client.HttpAuthAddUser(ctx, plan.AppName.ValueString(), user, userData.Password.ValueString())
 		if err != nil {
 			resp.Diagnostics.AddError("Unable to add http-auth user", "Unable to add http-auth user. "+err.Error())
 		}
 	}
 
 	if resp.Diagnostics.HasError() {
-		err := r.client.HttpAuthDisable(ctx, plan.AppName.ValueString())
+		err := client.HttpAuthDisable(ctx, plan.AppName.ValueString())
 		if err != nil {
 			resp.Diagnostics.AddError("Unable to disable http-auth", "Unable to disable http-auth. "+err.Error())
 		}
@@ -213,6 +237,14 @@ func (r *httpAuthResource) Update(ctx context.Context, req resource.UpdateReques
 		return
 	}
 
+	// Create SSH connection on-demand
+	client, err := r.config.NewClient(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("SSH connection failed", err.Error())
+		return
+	}
+	defer r.config.CloseClient(client)
+
 	if plan.AppName.ValueString() != state.AppName.ValueString() {
 		resp.Diagnostics.AddAttributeError(path.Root("app_name"), "App name can't be changed", "App name can't be changed")
 		return
@@ -227,7 +259,7 @@ func (r *httpAuthResource) Update(ctx context.Context, req resource.UpdateReques
 			}
 		}
 		if !found {
-			err := r.client.HttpAuthRemoveUser(ctx, state.AppName.ValueString(), existingUser)
+			err := client.HttpAuthRemoveUser(ctx, state.AppName.ValueString(), existingUser)
 			if err != nil {
 				resp.Diagnostics.AddAttributeError(path.Root("users").AtMapKey(existingUser), "Unable to remove user", "Unable to remove user. "+err.Error())
 				return
@@ -236,7 +268,7 @@ func (r *httpAuthResource) Update(ctx context.Context, req resource.UpdateReques
 	}
 
 	for user, userData := range plan.Users {
-		err := r.client.HttpAuthAddUser(ctx, plan.AppName.ValueString(), user, userData.Password.ValueString())
+		err := client.HttpAuthAddUser(ctx, plan.AppName.ValueString(), user, userData.Password.ValueString())
 		if err != nil {
 			resp.Diagnostics.AddError("Unable to add http-auth user", "Unable to add http-auth user. "+err.Error())
 			return
@@ -264,7 +296,15 @@ func (r *httpAuthResource) Delete(ctx context.Context, req resource.DeleteReques
 		return
 	}
 
-	err := r.client.HttpAuthDisable(ctx, state.AppName.ValueString())
+	// Create SSH connection on-demand
+	client, err := r.config.NewClient(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("SSH connection failed", err.Error())
+		return
+	}
+	defer r.config.CloseClient(client)
+
+	err = client.HttpAuthDisable(ctx, state.AppName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to disable http-auth", "Unable to disable http-auth. "+err.Error())
 		return

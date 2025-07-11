@@ -28,8 +28,6 @@ resource "dokku_app" "demo2" {
       mount_path = "/app/config"
       # copy local directory "./config" to host directory, that will be mounted as "/app/config"
       local_directory = "./config"
-
-      PORT = "5000"
     }
   }
 

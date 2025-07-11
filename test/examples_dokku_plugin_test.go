@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/gruntwork-io/terratest/modules/ssh"
@@ -14,34 +15,43 @@ import (
 )
 
 func TestExampleDokkuPlugin(t *testing.T) {
+	t.Parallel()
+
 	// Copy the dokku_plugin example directory first
 	testDir := test_structure.CopyTerraformFolderToTemp(t, "../", "examples/resources/dokku_plugin")
 
-	// Generate SSH keys first
-	var sshKeys *testSSHKeys
+	// Create isolated test environment
+	var env *testEnvironment
 	test_structure.RunTestStage(t, "generate_ssh_keys", func() {
-		sshKeys = generateSSHKeys(t, testDir)
+		env = createTestEnvironment(t, testDir)
 	})
 
+	// Ensure cleanup runs regardless of test outcome
+	defer func() {
+		if env != nil {
+			cleanupTestEnvironment(t, env)
+		}
+	}()
+
 	test_structure.RunTestStage(t, "setup_docker", func() {
-		setupDokkuContainer(t)
+		setupDokkuContainer(t, env)
 	})
 
 	test_structure.RunTestStage(t, "setup_ssh", func() {
-		setupSSH(t, sshKeys)
+		setupSSH(t, env)
 	})
 
 	test_structure.RunTestStage(t, "install_plugins", func() {
 		// Install the NATS plugin
 		t.Logf("Installing NATS plugin...")
 
-		installCmd := exec.Command("docker", "exec", containerName, "dokku", "plugin:install", "https://github.com/dokku/dokku-nats.git", "nats")
+		installCmd := exec.Command("docker", "exec", env.ContainerName, "dokku", "plugin:install", "https://github.com/dokku/dokku-nats.git", "nats")
 		output, err := installCmd.CombinedOutput()
 		t.Logf("Plugin install output: %s", string(output))
 		require.NoError(t, err, "Failed to install NATS plugin")
 
 		// Verify plugin was installed
-		verifyCmd := exec.Command("docker", "exec", containerName, "dokku", "plugin:list")
+		verifyCmd := exec.Command("docker", "exec", env.ContainerName, "dokku", "plugin:list")
 		verifyOutput, err := verifyCmd.CombinedOutput()
 		t.Logf("Plugin list output: %s", string(verifyOutput))
 		require.NoError(t, err, "Failed to list plugins")
@@ -81,11 +91,14 @@ variable "ssh_private_key" {
 		err := os.WriteFile(variablesFile, []byte(variablesTF), 0644)
 		require.NoError(t, err, "Failed to write variables.tf")
 
-		// Base terraform options
+		// Base terraform options using environment-specific settings
+		sshPort, err := strconv.Atoi(env.ExternalPorts["ssh"])
+		require.NoError(t, err, "Failed to parse SSH port")
+
 		vars := map[string]interface{}{
 			"dokku_host":      "localhost",
-			"dokku_port":      3022,
-			"ssh_private_key": sshKeys.privateKeyPEM,
+			"dokku_port":      sshPort,
+			"ssh_private_key": env.SSHKeys.privateKeyPEM,
 		}
 
 		terraformOptions := &terraform.Options{
@@ -116,15 +129,19 @@ variable "ssh_private_key" {
 		pluginName := "nats" // Use plugin name as identifier
 
 		keyPair := &ssh.KeyPair{
-			PublicKey:  sshKeys.publicKeySSH,
-			PrivateKey: sshKeys.privateKeyPEM,
+			PublicKey:  env.SSHKeys.publicKeySSH,
+			PrivateKey: env.SSHKeys.privateKeyPEM,
 		}
+
+		// Convert external port string to int
+		customPort, err := strconv.Atoi(env.ExternalPorts["ssh"])
+		require.NoError(t, err, "Failed to parse SSH port")
 
 		host := ssh.Host{
 			Hostname:    "localhost",
 			SshKeyPair:  keyPair,
 			SshUserName: "dokku",
-			CustomPort:  3022,
+			CustomPort:  customPort,
 		}
 
 		t.Logf("Validating dokku_plugin example: %s", pluginName)
@@ -140,14 +157,10 @@ variable "ssh_private_key" {
 	})
 
 	test_structure.RunTestStage(t, "destroy_terraform", func() {
-		destroyTerraform(t, testDir)
+		terraformOptions := test_structure.LoadTerraformOptions(t, testDir)
+		terraform.Destroy(t, terraformOptions)
 	})
 
-	test_structure.RunTestStage(t, "cleanup_test_files", func() {
-		cleanupTestFiles(t, testDir)
-	})
-
-	test_structure.RunTestStage(t, "cleanup_docker", func() {
-		cleanupDocker(t)
-	})
+	// Note: Final cleanup is handled by the defer statement at the beginning
+	// which calls cleanupTestEnvironment(t, env)
 }

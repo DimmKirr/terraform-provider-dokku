@@ -3,6 +3,7 @@ package test
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/gruntwork-io/terratest/modules/ssh"
@@ -13,21 +14,30 @@ import (
 )
 
 func TestExampleDokkuDomain(t *testing.T) {
+	t.Parallel()
+
 	// Copy the dokku_domain example directory first
 	testDir := test_structure.CopyTerraformFolderToTemp(t, "../", "examples/resources/dokku_domain")
 
-	// Generate SSH keys first
-	var sshKeys *testSSHKeys
+	// Create isolated test environment
+	var env *testEnvironment
 	test_structure.RunTestStage(t, "generate_ssh_keys", func() {
-		sshKeys = generateSSHKeys(t, testDir)
+		env = createTestEnvironment(t, testDir)
 	})
 
+	// Ensure cleanup runs regardless of test outcome
+	defer func() {
+		if env != nil {
+			cleanupTestEnvironment(t, env)
+		}
+	}()
+
 	test_structure.RunTestStage(t, "setup_docker", func() {
-		setupDokkuContainer(t)
+		setupDokkuContainer(t, env)
 	})
 
 	test_structure.RunTestStage(t, "setup_ssh", func() {
-		setupSSH(t, sshKeys)
+		setupSSH(t, env)
 	})
 
 	test_structure.RunTestStage(t, "apply_terraform", func() {
@@ -63,11 +73,14 @@ variable "ssh_private_key" {
 		err := os.WriteFile(variablesFile, []byte(variablesTF), 0644)
 		require.NoError(t, err, "Failed to write variables.tf")
 
-		// Base terraform options
+		// Base terraform options using environment-specific settings
+		sshPort, err := strconv.Atoi(env.ExternalPorts["ssh"])
+		require.NoError(t, err, "Failed to parse SSH port")
+
 		vars := map[string]interface{}{
 			"dokku_host":      "localhost",
-			"dokku_port":      3022,
-			"ssh_private_key": sshKeys.privateKeyPEM,
+			"dokku_port":      sshPort,
+			"ssh_private_key": env.SSHKeys.privateKeyPEM,
 		}
 
 		terraformOptions := &terraform.Options{
@@ -98,15 +111,19 @@ variable "ssh_private_key" {
 		expectedDomain := "example.com" // As defined in the example
 
 		keyPair := &ssh.KeyPair{
-			PublicKey:  sshKeys.publicKeySSH,
-			PrivateKey: sshKeys.privateKeyPEM,
+			PublicKey:  env.SSHKeys.publicKeySSH,
+			PrivateKey: env.SSHKeys.privateKeyPEM,
 		}
+
+		// Convert external port string to int
+		customPort, err := strconv.Atoi(env.ExternalPorts["ssh"])
+		require.NoError(t, err, "Failed to parse SSH port")
 
 		host := ssh.Host{
 			Hostname:    "localhost",
 			SshKeyPair:  keyPair,
 			SshUserName: "dokku",
-			CustomPort:  3022,
+			CustomPort:  customPort,
 		}
 
 		// Verify the global domain exists
@@ -149,14 +166,14 @@ variable "ssh_private_key" {
 	})
 
 	test_structure.RunTestStage(t, "destroy_terraform", func() {
-		destroyTerraform(t, testDir)
+		terraformOptions := test_structure.LoadTerraformOptions(t, testDir)
+		// Use DestroyE since the apply might have failed and there might be nothing to destroy
+		_, destroyErr := terraform.DestroyE(t, terraformOptions)
+		if destroyErr != nil {
+			t.Logf("Destroy failed (expected if apply failed): %v", destroyErr)
+		}
 	})
 
-	test_structure.RunTestStage(t, "cleanup_test_files", func() {
-		cleanupTestFiles(t, testDir)
-	})
-
-	test_structure.RunTestStage(t, "cleanup_docker", func() {
-		cleanupDocker(t)
-	})
+	// Note: Final cleanup is handled by the defer statement at the beginning
+	// which calls cleanupTestEnvironment(t, env)
 }

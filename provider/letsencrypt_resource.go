@@ -2,11 +2,11 @@ package provider
 
 import (
 	"context"
+	"fmt"
 	"regexp"
 	"strings"
 
-	dokkuclient "github.com/aliksend/terraform-provider-dokku/provider/dokku_client"
-
+	"github.com/aliksend/terraform-provider-dokku/internal/config"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -28,7 +28,7 @@ func NewLetsencryptResource() resource.Resource {
 }
 
 type letsencryptResource struct {
-	client *dokkuclient.Client
+	config *config.DokkuConfig
 }
 
 type letsencryptResourceModel struct {
@@ -41,14 +41,22 @@ func (r *letsencryptResource) Metadata(_ context.Context, req resource.MetadataR
 	resp.TypeName = req.ProviderTypeName + "_letsencrypt"
 }
 
-// Configure adds the provider configured client to the resource.
-func (r *letsencryptResource) Configure(_ context.Context, req resource.ConfigureRequest, _ *resource.ConfigureResponse) {
+// Configure adds the provider configured config to the resource.
+func (r *letsencryptResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
 	if req.ProviderData == nil {
 		return
 	}
 
-	//nolint:forcetypeassert
-	r.client = req.ProviderData.(*dokkuclient.Client)
+	config, ok := req.ProviderData.(*config.DokkuConfig)
+	if !ok {
+		resp.Diagnostics.AddError(
+			"Unexpected Resource Configure Type",
+			fmt.Sprintf("Expected *config.DokkuConfig, got: %T", req.ProviderData),
+		)
+		return
+	}
+
+	r.config = config
 }
 
 // Schema defines the schema for the resource.
@@ -90,8 +98,16 @@ func (r *letsencryptResource) Read(ctx context.Context, req resource.ReadRequest
 		return
 	}
 
+	// Create SSH connection on-demand
+	client, err := r.config.NewClient(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("SSH connection failed", err.Error())
+		return
+	}
+	defer r.config.CloseClient(client)
+
 	// Read letsencrypt status
-	exists, err := r.client.LetsencryptIsEnabled(ctx, state.AppName.ValueString())
+	exists, err := client.LetsencryptIsEnabled(ctx, state.AppName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to read letsencrypt status", "Unable to read letsencrypt status. "+err.Error())
 		return
@@ -119,8 +135,16 @@ func (r *letsencryptResource) Create(ctx context.Context, req resource.CreateReq
 		return
 	}
 
+	// Create SSH connection on-demand
+	client, err := r.config.NewClient(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("SSH connection failed", err.Error())
+		return
+	}
+	defer r.config.CloseClient(client)
+
 	// Read letsencrypt status
-	exists, err := r.client.LetsencryptIsEnabled(ctx, plan.AppName.ValueString())
+	exists, err := client.LetsencryptIsEnabled(ctx, plan.AppName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to read letsencrypt status", "Unable to read letsencrypt status. "+err.Error())
 		return
@@ -131,21 +155,21 @@ func (r *letsencryptResource) Create(ctx context.Context, req resource.CreateReq
 	}
 
 	// Set letsencrypt email
-	err = r.client.LetsencryptSetEmail(ctx, plan.AppName.ValueString(), plan.Email.ValueString())
+	err = client.LetsencryptSetEmail(ctx, plan.AppName.ValueString(), plan.Email.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to set letsencrypt email", "Unable to set letsencrypt email. "+err.Error())
 		return
 	}
 
 	// Enable letsencrypt
-	err = r.client.LetsencryptEnable(ctx, plan.AppName.ValueString())
+	err = client.LetsencryptEnable(ctx, plan.AppName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to enable letsencrypt", "Unable to enable letsencrypt. "+err.Error())
 		return
 	}
 
 	// Add cronjob for auto-renew
-	err = r.client.LetsencryptAddCronJob(ctx)
+	err = client.LetsencryptAddCronJob(ctx)
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to add letsencrypt cronjob", "Unable to add letsencrypt cronjob. "+err.Error())
 		return
@@ -180,7 +204,15 @@ func (r *letsencryptResource) Update(ctx context.Context, req resource.UpdateReq
 		return
 	}
 
-	err := r.client.LetsencryptSetEmail(ctx, plan.AppName.ValueString(), plan.Email.ValueString())
+	// Create SSH connection on-demand
+	client, err := r.config.NewClient(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("SSH connection failed", err.Error())
+		return
+	}
+	defer r.config.CloseClient(client)
+
+	err = client.LetsencryptSetEmail(ctx, plan.AppName.ValueString(), plan.Email.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to set letsencrypt email", "Unable to set letsencrypt email. "+err.Error())
 		return
@@ -203,8 +235,16 @@ func (r *letsencryptResource) Delete(ctx context.Context, req resource.DeleteReq
 		return
 	}
 
+	// Create SSH connection on-demand
+	client, err := r.config.NewClient(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("SSH connection failed", err.Error())
+		return
+	}
+	defer r.config.CloseClient(client)
+
 	// Read letsencrypt status
-	exists, err := r.client.LetsencryptIsEnabled(ctx, state.AppName.ValueString())
+	exists, err := client.LetsencryptIsEnabled(ctx, state.AppName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to read letsencrypt status", "Unable to read letsencrypt status. "+err.Error())
 		return
@@ -214,7 +254,7 @@ func (r *letsencryptResource) Delete(ctx context.Context, req resource.DeleteReq
 	}
 
 	// Disable letsencrypt
-	err = r.client.LetsencryptDisable(ctx, state.AppName.ValueString())
+	err = client.LetsencryptDisable(ctx, state.AppName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to disable letsencrypt", "Unable to disable letsencrypt. "+err.Error())
 		return

@@ -6,9 +6,11 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -33,17 +35,109 @@ func getDokkuVersion() string {
 	return version
 }
 
-const (
-	containerName = "dokku-test-container"
-	sshPort       = "3022"
-	httpPort      = "8080"
-)
+// testEnvironment holds all resources for a single test
+type testEnvironment struct {
+	ContainerName string
+	NetworkName   string
+	SSHKeys       *testSSHKeys
+	InternalPorts map[string]string
+	ExternalPorts map[string]string
+	TestDir       string
+}
 
 type testSSHKeys struct {
 	privateKeyPEM  string
 	publicKeySSH   string
 	privateKeyPath string
 	publicKeyPath  string
+}
+
+// createTestEnvironment sets up an isolated test environment for parallel execution
+func createTestEnvironment(t *testing.T, testDir string) *testEnvironment {
+	// Generate unique names for resources using test name and timestamp to avoid conflicts
+	timestamp := time.Now().UnixNano()
+	testName := strings.ReplaceAll(t.Name(), "/", "-")
+
+	containerName := fmt.Sprintf("dokku-test-%s-%d", testName, timestamp)
+	networkName := fmt.Sprintf("network-%s-%d", testName, timestamp)
+
+	// Create Docker network for test isolation
+	createNetworkCmd := exec.Command("docker", "network", "create", networkName)
+	if err := createNetworkCmd.Run(); err != nil {
+		t.Logf("Warning: Failed to create network %s: %v", networkName, err)
+		// Continue without custom network - tests will use default bridge
+		networkName = ""
+	} else {
+		t.Logf("Created Docker network: %s", networkName)
+	}
+
+	// Generate dynamic external ports to avoid conflicts
+	sshPort := findAvailablePort(t)
+	httpPort := findAvailablePort(t)
+
+	// Generate SSH keys for this test environment
+	sshKeys := generateSSHKeys(t, testDir)
+
+	return &testEnvironment{
+		ContainerName: containerName,
+		NetworkName:   networkName,
+		SSHKeys:       sshKeys,
+		InternalPorts: map[string]string{
+			"ssh":  "22",
+			"http": "80",
+		},
+		ExternalPorts: map[string]string{
+			"ssh":  strconv.Itoa(sshPort),
+			"http": strconv.Itoa(httpPort),
+		},
+		TestDir: testDir,
+	}
+}
+
+// findAvailablePort finds and returns an available ephemeral TCP port.
+func findAvailablePort(t *testing.T) int {
+	t.Helper()
+	listener, err := net.Listen("tcp", "localhost:0")
+	if err != nil {
+		t.Fatalf("Failed to find an available port: %v", err)
+	}
+	defer listener.Close()
+
+	addr := listener.Addr().(*net.TCPAddr)
+	port := addr.Port
+	t.Logf("Found available port: %d", port)
+	return port
+}
+
+// cleanupTestEnvironment cleans up all resources for a test environment
+func cleanupTestEnvironment(t *testing.T, env *testEnvironment) {
+	if env == nil {
+		return
+	}
+
+	// Stop and remove container
+	if env.ContainerName != "" {
+		stopCmd := exec.Command("docker", "stop", env.ContainerName)
+		stopCmd.Run() // Ignore errors - container might already be stopped
+
+		removeCmd := exec.Command("docker", "rm", "-f", env.ContainerName)
+		removeCmd.Run() // Ignore errors - container might not exist
+
+		t.Logf("Cleaned up container: %s", env.ContainerName)
+	}
+
+	// Remove network if we created one
+	if env.NetworkName != "" {
+		removeNetworkCmd := exec.Command("docker", "network", "rm", env.NetworkName)
+		if err := removeNetworkCmd.Run(); err != nil {
+			t.Logf("Warning: Failed to remove network %s: %v", env.NetworkName, err)
+		} else {
+			t.Logf("Cleaned up network: %s", env.NetworkName)
+		}
+	}
+
+	// Clean up test files
+	cleanupTestFiles(t, env.TestDir)
 }
 
 func generateSSHKeys(t *testing.T, testDir string) *testSSHKeys {
@@ -62,6 +156,10 @@ func generateSSHKeys(t *testing.T, testDir string) *testSSHKeys {
 	publicKey, err := cryptossh.NewPublicKey(&privateKey.PublicKey)
 	require.NoError(t, err, "Failed to generate public key")
 	publicKeySSH := string(cryptossh.MarshalAuthorizedKey(publicKey))
+
+	// Ensure the directory exists
+	err = os.MkdirAll(testDir, 0755)
+	require.NoError(t, err, "Failed to create test directory")
 
 	// Write keys to files
 	privateKeyPath := filepath.Join(testDir, "ssh_key")
@@ -83,28 +181,40 @@ func generateSSHKeys(t *testing.T, testDir string) *testSSHKeys {
 	}
 }
 
-func setupDokkuContainer(t *testing.T) {
+func setupDokkuContainer(t *testing.T, env *testEnvironment) {
 	// Try to remove any existing container with the same name
-	cleanupCmd := exec.Command("docker", "rm", "-f", containerName)
+	cleanupCmd := exec.Command("docker", "rm", "-f", env.ContainerName)
 	cleanupCmd.Run()
 
 	// Get the Dokku version to use
 	dokkuVersion := getDokkuVersion()
 	dokkuImageName := fmt.Sprintf("dokku/dokku:%s", dokkuVersion)
 
+	// Prepare run options with dynamic naming and networking
+	otherOptions := []string{
+		"-e", "DOKKU_HOSTNAME=dokku.test",
+		"-e", "DOKKU_HOST_ROOT=/home/dokku/dokku",
+		"-v", "/var/run/docker.sock:/var/run/docker.sock",
+		"--add-host", "host.docker.internal:host-gateway",
+	}
+
+	// Always use port mapping for external access, regardless of network
+	otherOptions = append(otherOptions,
+		"-p", fmt.Sprintf("%s:%s", env.ExternalPorts["ssh"], env.InternalPorts["ssh"]),
+		"-p", fmt.Sprintf("%s:%s", env.ExternalPorts["http"], env.InternalPorts["http"]),
+	)
+
+	// Add network configuration if we have a custom network (for container-to-container communication)
+	if env.NetworkName != "" {
+		otherOptions = append(otherOptions, "--network", env.NetworkName)
+	}
+
 	// Run the Dokku container
 	runOptions := &docker.RunOptions{
-		Name:       containerName,
-		Detach:     true,
-		Privileged: true,
-		OtherOptions: []string{
-			"-p", fmt.Sprintf("%s:22", sshPort),
-			"-p", fmt.Sprintf("%s:80", httpPort),
-			"-e", "DOKKU_HOSTNAME=dokku.test",
-			"-e", "DOKKU_HOST_ROOT=/home/dokku/dokku",
-			"-v", "/var/run/docker.sock:/var/run/docker.sock",
-			"--add-host", "host.docker.internal:host-gateway",
-		},
+		Name:         env.ContainerName,
+		Detach:       true,
+		Privileged:   true,
+		OtherOptions: otherOptions,
 	}
 
 	docker.Run(t, dokkuImageName, runOptions)
@@ -115,14 +225,13 @@ func setupDokkuContainer(t *testing.T) {
 	sshServiceRunning := false
 
 	for i := 0; i < retries; i++ {
-		// Check if SSH is running inside the container
-		sshCheckCmd := exec.Command("docker", "exec", containerName, "service", "ssh", "status")
+		sshCheckCmd := exec.Command("docker", "exec", env.ContainerName, "service", "ssh", "status")
 		err := sshCheckCmd.Run()
 		if err == nil {
 			sshServiceRunning = true
 			break
 		}
-		require.Error(t, err, "SSH service check failed")
+		t.Logf("SSH service check attempt %d failed: %v", i+1, err)
 		time.Sleep(retryInterval)
 	}
 
@@ -130,7 +239,7 @@ func setupDokkuContainer(t *testing.T) {
 	dokkuInstalled := false
 	if sshServiceRunning {
 		// Check if dokku command works
-		dokkuCheckCmd := exec.Command("docker", "exec", containerName, "dokku", "--version")
+		dokkuCheckCmd := exec.Command("docker", "exec", env.ContainerName, "dokku", "--version")
 		err := dokkuCheckCmd.Run()
 		if err == nil {
 			dokkuInstalled = true
@@ -140,15 +249,24 @@ func setupDokkuContainer(t *testing.T) {
 	// Only proceed if both SSH and Dokku are working
 	require.True(t, sshServiceRunning && dokkuInstalled, "Container basic checks passed")
 
+	// Verify container is actually running and ports are mapped
+	inspectCmd := exec.Command("docker", "inspect", env.ContainerName, "--format", "{{.State.Running}} {{.NetworkSettings.Ports}}")
+	inspectOutput, err := inspectCmd.CombinedOutput()
+	if err != nil {
+		t.Logf("Container inspection failed: %v", err)
+	} else {
+		t.Logf("Container status and ports: %s", string(inspectOutput))
+	}
+
 	// Wait additional time to ensure services are fully stabilized
 	t.Logf("Container ready, waiting additional 15 seconds for services to fully stabilize...")
 	time.Sleep(15 * time.Second)
 }
 
-func setupSSH(t *testing.T, keys *testSSHKeys) {
+func setupSSH(t *testing.T, env *testEnvironment) {
 	// Use the generated SSH keys
-	pubKey := keys.publicKeySSH
-	privateKeyPath := keys.privateKeyPath
+	pubKey := env.SSHKeys.publicKeySSH
+	privateKeyPath := env.SSHKeys.privateKeyPath
 
 	// Fix permissions on private key first
 	exec.Command("chmod", "600", privateKeyPath).Run()
@@ -159,7 +277,7 @@ func setupSSH(t *testing.T, keys *testSSHKeys) {
 	// Multiple attempts to set up SSH properly
 	for attempt := 0; attempt < 3; attempt++ {
 		// Configure SSH key in the container with more thorough setup
-		setupCmd := exec.Command("docker", "exec", containerName, "bash", "-c", fmt.Sprintf(`
+		setupCmd := exec.Command("docker", "exec", env.ContainerName, "bash", "-c", fmt.Sprintf(`
 			# Ensure dokku user exists
 			id dokku || exit 1
 			
@@ -200,6 +318,19 @@ func setupSSH(t *testing.T, keys *testSSHKeys) {
 	// Give SSH service more time to fully start
 	time.Sleep(10 * time.Second)
 
+	// Test port connectivity
+	t.Logf("Testing port connectivity to localhost:%s", env.ExternalPorts["ssh"])
+	portCmd := exec.Command("nc", "-zv", "localhost", env.ExternalPorts["ssh"])
+	for i := 0; i < 5; i++ {
+		output, err := portCmd.CombinedOutput()
+		t.Logf("Port test attempt %d: %v, output: %s", i+1, err, string(output))
+		if err == nil {
+			t.Logf("Port %s is accessible", env.ExternalPorts["ssh"])
+			break
+		}
+		time.Sleep(2 * time.Second)
+	}
+
 	// Verify SSH connectivity with the dokku version command
 	maxRetries := 5
 	retryDelay := 3 * time.Second
@@ -207,7 +338,7 @@ func setupSSH(t *testing.T, keys *testSSHKeys) {
 	for i := 0; i < maxRetries; i++ {
 		sshCmd := exec.Command("ssh", "-F", "/dev/null", // Bypass user SSH config
 			"-i", privateKeyPath,
-			"-p", sshPort,
+			"-p", env.ExternalPorts["ssh"],
 			"-o", "StrictHostKeyChecking=no",
 			"-o", "UserKnownHostsFile=/dev/null",
 			"-o", "ConnectTimeout=10",
@@ -232,9 +363,9 @@ func setupSSH(t *testing.T, keys *testSSHKeys) {
 	t.Logf("Warning: SSH connection test failed after %d attempts, but continuing anyway", maxRetries)
 }
 
-func isContainerReady(t *testing.T, keys *testSSHKeys) bool {
+func isContainerReady(t *testing.T, env *testEnvironment) bool {
 	// Check if we can SSH to the container and run a dokku command
-
+	keys := env.SSHKeys
 	keyFile := keys.privateKeyPath
 	if _, err := os.Stat(keyFile); os.IsNotExist(err) {
 		t.Logf("SSH key file not found at %s", keyFile)
@@ -247,6 +378,10 @@ func isContainerReady(t *testing.T, keys *testSSHKeys) bool {
 	// Get the Dokku version to use
 	dokkuVersion := getDokkuVersion()
 
+	// Determine connection details
+	sshHost := "localhost"
+	sshPort := env.ExternalPorts["ssh"]
+
 	// Try SSH connection with the key and test dokku command
 	cmd := exec.Command("ssh", "-F", "/dev/null",
 		"-o", "StrictHostKeyChecking=no",
@@ -255,7 +390,7 @@ func isContainerReady(t *testing.T, keys *testSSHKeys) bool {
 		"-o", "ConnectTimeout=10",
 		"-i", keyFile,
 		"-p", sshPort,
-		"dokku@localhost",
+		fmt.Sprintf("dokku@%s", sshHost),
 		"--quiet version")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -553,13 +688,20 @@ func destroyTerraform(t *testing.T, testDir string) {
 	terraform.Destroy(t, terraformOptions)
 }
 
-func cleanupDocker(t *testing.T) {
+func cleanupDocker(t *testing.T, env *testEnvironment) {
+	if env == nil || env.ContainerName == "" {
+		t.Logf("No container to clean up")
+		return
+	}
+
 	// Stop and remove container
-	docker.Stop(t, []string{containerName}, &docker.StopOptions{})
+	docker.Stop(t, []string{env.ContainerName}, &docker.StopOptions{})
 
 	// Remove container (don't remove the official image)
-	exec.Command("docker", "rm", "-f", containerName).Run()
+	exec.Command("docker", "rm", "-f", env.ContainerName).Run()
 	// Skip removing the official image: exec.Command("docker", "rmi", "-f", dokkuImageName).Run()
+
+	t.Logf("Cleaned up container: %s", env.ContainerName)
 }
 
 func cleanupTestFiles(t *testing.T, testDir string) {
