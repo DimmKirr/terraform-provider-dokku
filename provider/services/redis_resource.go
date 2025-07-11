@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"regexp"
 
-	dokkuclient "github.com/aliksend/terraform-provider-dokku/provider/dokku_client"
+	"github.com/aliksend/terraform-provider-dokku/internal/config"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/path"
@@ -29,7 +29,7 @@ func NewRedisResource() resource.Resource {
 }
 
 type redisResource struct {
-	client *dokkuclient.Client
+	config *config.DokkuConfig
 }
 
 type redisResourceModel struct {
@@ -43,14 +43,22 @@ func (r *redisResource) Metadata(_ context.Context, req resource.MetadataRequest
 	resp.TypeName = req.ProviderTypeName + "_redis"
 }
 
-// Configure adds the provider configured client to the resource.
-func (r *redisResource) Configure(_ context.Context, req resource.ConfigureRequest, _ *resource.ConfigureResponse) {
+// Configure adds the provider configured config to the resource.
+func (r *redisResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
 	if req.ProviderData == nil {
 		return
 	}
 
-	//nolint:forcetypeassert
-	r.client = req.ProviderData.(*dokkuclient.Client)
+	config, ok := req.ProviderData.(*config.DokkuConfig)
+	if !ok {
+		resp.Diagnostics.AddError(
+			"Unexpected Resource Configure Type",
+			fmt.Sprintf("Expected *config.DokkuConfig, got: %T", req.ProviderData),
+		)
+		return
+	}
+
+	r.config = config
 }
 
 // Schema defines the schema for the resource.
@@ -99,8 +107,16 @@ func (r *redisResource) Read(ctx context.Context, req resource.ReadRequest, resp
 		return
 	}
 
+	// Create SSH connection on-demand
+	client, err := r.config.NewClient(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("SSH connection failed", err.Error())
+		return
+	}
+	defer r.config.CloseClient(client)
+
 	// Check service existence
-	exists, err := r.client.SimpleServiceExists(ctx, "redis", state.ServiceName.ValueString())
+	exists, err := client.SimpleServiceExists(ctx, "redis", state.ServiceName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to check redis service existence", "Unable to check redis service existence. "+err.Error())
 		return
@@ -110,7 +126,7 @@ func (r *redisResource) Read(ctx context.Context, req resource.ReadRequest, resp
 		return
 	}
 
-	info, err := r.client.SimpleServiceInfo(ctx, "redis", state.ServiceName.ValueString())
+	info, err := client.SimpleServiceInfo(ctx, "redis", state.ServiceName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to get redis service info", "Unable to get redis service info. "+err.Error())
 		return
@@ -149,8 +165,16 @@ func (r *redisResource) Create(ctx context.Context, req resource.CreateRequest, 
 		return
 	}
 
+	// Create SSH connection on-demand
+	client, err := r.config.NewClient(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("SSH connection failed", err.Error())
+		return
+	}
+	defer r.config.CloseClient(client)
+
 	// Create service is not exists
-	exists, err := r.client.SimpleServiceExists(ctx, "redis", plan.ServiceName.ValueString())
+	exists, err := client.SimpleServiceExists(ctx, "redis", plan.ServiceName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to check redis service existence", "Unable to check redis service existence. "+err.Error())
 		return
@@ -172,14 +196,14 @@ func (r *redisResource) Create(ctx context.Context, req resource.CreateRequest, 
 		}
 	}
 
-	err = r.client.SimpleServiceCreate(ctx, "redis", plan.ServiceName.ValueString(), args...)
+	err = client.SimpleServiceCreate(ctx, "redis", plan.ServiceName.ValueString(), args...)
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to create redis service", "Unable to create redis service. "+err.Error())
 		return
 	}
 
 	if !plan.Expose.IsNull() {
-		err := r.client.SimpleServiceExpose(ctx, "redis", plan.ServiceName.ValueString(), plan.Expose.ValueString())
+		err := client.SimpleServiceExpose(ctx, "redis", plan.ServiceName.ValueString(), plan.Expose.ValueString())
 		if err != nil {
 			resp.Diagnostics.AddError("Unable to expose redis service", "Unable to expose redis service. "+err.Error())
 			return
@@ -210,26 +234,34 @@ func (r *redisResource) Update(ctx context.Context, req resource.UpdateRequest, 
 		return
 	}
 
+	// Create SSH connection on-demand
+	client, err := r.config.NewClient(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("SSH connection failed", err.Error())
+		return
+	}
+	defer r.config.CloseClient(client)
+
 	if plan.ServiceName.ValueString() != state.ServiceName.ValueString() {
 		resp.Diagnostics.AddError("service_name can't be changed", "service_name can't be changed")
 	}
 
 	if !plan.Expose.IsNull() {
 		if !plan.Expose.Equal(state.Expose) {
-			err := r.client.SimpleServiceUnexpose(ctx, "redis", state.ServiceName.ValueString())
+			err := client.SimpleServiceUnexpose(ctx, "redis", state.ServiceName.ValueString())
 			if err != nil {
 				resp.Diagnostics.AddError("Unable to unexpose redis service", "Unable to unexpose redis service. "+err.Error())
 				return
 			}
 
-			err = r.client.SimpleServiceExpose(ctx, "redis", plan.ServiceName.ValueString(), plan.Expose.ValueString())
+			err = client.SimpleServiceExpose(ctx, "redis", plan.ServiceName.ValueString(), plan.Expose.ValueString())
 			if err != nil {
 				resp.Diagnostics.AddError("Unable to expose redis service", "Unable to expose redis service. "+err.Error())
 				return
 			}
 		}
 	} else if !state.Expose.IsNull() {
-		err := r.client.SimpleServiceUnexpose(ctx, "redis", state.ServiceName.ValueString())
+		err := client.SimpleServiceUnexpose(ctx, "redis", state.ServiceName.ValueString())
 		if err != nil {
 			resp.Diagnostics.AddError("Unable to unexpose redis service", "Unable to unexpose redis service. "+err.Error())
 			return
@@ -257,8 +289,16 @@ func (r *redisResource) Delete(ctx context.Context, req resource.DeleteRequest, 
 		return
 	}
 
+	// Create SSH connection on-demand
+	client, err := r.config.NewClient(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("SSH connection failed", err.Error())
+		return
+	}
+	defer r.config.CloseClient(client)
+
 	// Check service existence
-	exists, err := r.client.SimpleServiceExists(ctx, "redis", state.ServiceName.ValueString())
+	exists, err := client.SimpleServiceExists(ctx, "redis", state.ServiceName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to check redis service existence", "Unable to check redis service existence. "+err.Error())
 		return
@@ -268,7 +308,7 @@ func (r *redisResource) Delete(ctx context.Context, req resource.DeleteRequest, 
 	}
 
 	// Destroy instance
-	err = r.client.SimpleServiceDestroy(ctx, "redis", state.ServiceName.ValueString())
+	err = client.SimpleServiceDestroy(ctx, "redis", state.ServiceName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to destroy service", "Unable to destroy service. "+err.Error())
 		return

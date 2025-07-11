@@ -132,3 +132,8 @@ func (c *Client) GetVersion(ctx context.Context) (rawVersion string, parsedVersi
 	c.dokkuVersion = parsedVersion
 	return found, parsedVersion, err
 }
+
+// GetSSHClient returns the underlying SSH client for connection management
+func (c *Client) GetSSHClient() *goph.Client {
+	return c.client
+}

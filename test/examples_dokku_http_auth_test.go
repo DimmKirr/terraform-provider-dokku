@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -17,20 +18,29 @@ import (
 )
 
 func TestExampleDokkuHttpAuth(t *testing.T) {
+	t.Parallel()
+
 	// Copy the dokku_http_auth example directory first
 	testDir := test_structure.CopyTerraformFolderToTemp(t, "../", "examples/resources/dokku_http_auth")
 
-	// Generate SSH keys first
-	var sshKeys *testSSHKeys
+	// Create isolated test environment
+	var env *testEnvironment
 	test_structure.RunTestStage(t, "generate_ssh_keys", func() {
-		sshKeys = generateSSHKeys(t, testDir)
+		env = createTestEnvironment(t, testDir)
 	})
 
+	// Ensure cleanup runs regardless of test outcome
+	defer func() {
+		if env != nil {
+			cleanupTestEnvironment(t, env)
+		}
+	}()
+
 	test_structure.RunTestStage(t, "setup_docker", func() {
-		setupDokkuContainer(t)
+		setupDokkuContainer(t, env)
 
 		// Install the http-auth plugin - ignore package update failures as they don't affect the plugin functionality
-		pluginInstallCmd := exec.Command("docker", "exec", containerName, "dokku", "plugin:install", "https://github.com/dokku/dokku-http-auth.git")
+		pluginInstallCmd := exec.Command("docker", "exec", env.ContainerName, "dokku", "plugin:install", "https://github.com/dokku/dokku-http-auth.git")
 		pluginInstallOutput, err := pluginInstallCmd.CombinedOutput()
 		pluginOutputStr := string(pluginInstallOutput)
 
@@ -44,7 +54,7 @@ func TestExampleDokkuHttpAuth(t *testing.T) {
 		}
 
 		// Verify plugin is available
-		pluginListCmd := exec.Command("docker", "exec", containerName, "dokku", "plugin:list")
+		pluginListCmd := exec.Command("docker", "exec", env.ContainerName, "dokku", "plugin:list")
 		listOutput, listErr := pluginListCmd.CombinedOutput()
 		if listErr == nil && strings.Contains(string(listOutput), "http-auth") {
 			t.Logf("✓ HTTP auth plugin is available and enabled")
@@ -57,7 +67,7 @@ func TestExampleDokkuHttpAuth(t *testing.T) {
 	})
 
 	test_structure.RunTestStage(t, "setup_ssh", func() {
-		setupSSH(t, sshKeys)
+		setupSSH(t, env)
 	})
 
 	test_structure.RunTestStage(t, "apply_terraform", func() {
@@ -93,11 +103,14 @@ variable "ssh_private_key" {
 		err := os.WriteFile(variablesFile, []byte(variablesTF), 0644)
 		require.NoError(t, err, "Failed to write variables.tf")
 
-		// Base terraform options
+		// Base terraform options using environment-specific settings
+		sshPort, err := strconv.Atoi(env.ExternalPorts["ssh"])
+		require.NoError(t, err, "Failed to parse SSH port")
+
 		vars := map[string]interface{}{
 			"dokku_host":      "localhost",
-			"dokku_port":      3022,
-			"ssh_private_key": sshKeys.privateKeyPEM,
+			"dokku_port":      sshPort,
+			"ssh_private_key": env.SSHKeys.privateKeyPEM,
 			"docker_image":    "jmalloc/echo-server",
 		}
 
@@ -121,7 +134,7 @@ variable "ssh_private_key" {
 		}
 
 		// Rebuild the app to ensure the http-auth settings are applied
-		rebuildCmd := exec.Command("docker", "exec", containerName, "dokku", "ps:rebuild", "demo")
+		rebuildCmd := exec.Command("docker", "exec", env.ContainerName, "dokku", "ps:rebuild", "demo")
 		rebuildOutput, err := rebuildCmd.CombinedOutput()
 		require.NoError(t, err, "Failed to rebuild app: %s", string(rebuildOutput))
 
@@ -134,13 +147,13 @@ variable "ssh_private_key" {
 		// Also, the proxy might be disabled due to complex configuration in the example
 
 		// First check if proxy is enabled for demo
-		proxyCheckCmd := exec.Command("docker", "exec", containerName, "dokku", "proxy:report", "demo")
+		proxyCheckCmd := exec.Command("docker", "exec", env.ContainerName, "dokku", "proxy:report", "demo")
 		proxyOutput, err := proxyCheckCmd.CombinedOutput()
 		if err == nil {
 			t.Logf("Proxy status: %s", string(proxyOutput))
 			if strings.Contains(string(proxyOutput), "Proxy enabled:                 false") {
 				t.Logf("Proxy is disabled, enabling it...")
-				enableCmd := exec.Command("docker", "exec", containerName, "dokku", "proxy:enable", "demo")
+				enableCmd := exec.Command("docker", "exec", env.ContainerName, "dokku", "proxy:enable", "demo")
 				enableOutput, enableErr := enableCmd.CombinedOutput()
 				if enableErr != nil {
 					t.Logf("Enable proxy output: %s", string(enableOutput))
@@ -150,11 +163,11 @@ variable "ssh_private_key" {
 		}
 
 		// Check and fix NO_VHOST issue - the app might have NO_VHOST=1 which prevents HTTP access
-		vhostCheckCmd := exec.Command("docker", "exec", containerName, "dokku", "config:get", "demo", "NO_VHOST")
+		vhostCheckCmd := exec.Command("docker", "exec", env.ContainerName, "dokku", "config:get", "demo", "NO_VHOST")
 		vhostOutput, err := vhostCheckCmd.CombinedOutput()
 		if err == nil && strings.TrimSpace(string(vhostOutput)) == "1" {
 			t.Logf("NO_VHOST is set to 1, unsetting it to enable HTTP access")
-			unsetVhostCmd := exec.Command("docker", "exec", containerName, "dokku", "config:unset", "demo", "NO_VHOST")
+			unsetVhostCmd := exec.Command("docker", "exec", env.ContainerName, "dokku", "config:unset", "demo", "NO_VHOST")
 			unsetOutput, unsetErr := unsetVhostCmd.CombinedOutput()
 			if unsetErr != nil {
 				t.Logf("Failed to unset NO_VHOST: %v, output: %s", unsetErr, string(unsetOutput))
@@ -163,7 +176,7 @@ variable "ssh_private_key" {
 
 				// Add a domain to enable proper HTTP routing
 				t.Logf("Adding domain to enable HTTP routing")
-				domainCmd := exec.Command("docker", "exec", containerName, "dokku", "domains:add", "demo", "demo.dokku.test")
+				domainCmd := exec.Command("docker", "exec", env.ContainerName, "dokku", "domains:add", "demo", "demo.dokku.test")
 				domainOutput, domainErr := domainCmd.CombinedOutput()
 				if domainErr != nil {
 					t.Logf("Domain add warning: %v, output: %s", domainErr, string(domainOutput))
@@ -173,7 +186,7 @@ variable "ssh_private_key" {
 
 				// Restart the app to apply the configuration change
 				t.Logf("Restarting app to apply NO_VHOST configuration change")
-				restartCmd := exec.Command("docker", "exec", containerName, "dokku", "ps:restart", "demo")
+				restartCmd := exec.Command("docker", "exec", env.ContainerName, "dokku", "ps:restart", "demo")
 				restartOutput, restartErr := restartCmd.CombinedOutput()
 				if restartErr != nil {
 					t.Logf("App restart warning: %v, output: %s", restartErr, string(restartOutput))
@@ -187,7 +200,7 @@ variable "ssh_private_key" {
 		}
 
 		// Manually reload nginx to ensure the proxy configuration is active
-		reloadCmd := exec.Command("docker", "exec", containerName, "nginx", "-s", "reload")
+		reloadCmd := exec.Command("docker", "exec", env.ContainerName, "nginx", "-s", "reload")
 		err = reloadCmd.Run()
 		if err != nil {
 			t.Logf("Nginx reload warning (expected in test environment): %v", err)
@@ -201,15 +214,19 @@ variable "ssh_private_key" {
 		appName := "demo"
 
 		keyPair := &ssh.KeyPair{
-			PublicKey:  sshKeys.publicKeySSH,
-			PrivateKey: sshKeys.privateKeyPEM,
+			PublicKey:  env.SSHKeys.publicKeySSH,
+			PrivateKey: env.SSHKeys.privateKeyPEM,
 		}
+
+		// Convert external port string to int
+		customPort, err := strconv.Atoi(env.ExternalPorts["ssh"])
+		require.NoError(t, err, "Failed to parse SSH port")
 
 		host := ssh.Host{
 			Hostname:    "localhost",
 			SshKeyPair:  keyPair,
 			SshUserName: "dokku",
-			CustomPort:  3022,
+			CustomPort:  customPort,
 		}
 
 		t.Logf("Validating dokku_http_auth example: %s", appName)
@@ -271,7 +288,7 @@ variable "ssh_private_key" {
 		t.Logf("=== Manual Plugin Verification ===")
 
 		// Check if plugin is installed and available
-		pluginListCmd := exec.Command("docker", "exec", containerName, "dokku", "plugin:list")
+		pluginListCmd := exec.Command("docker", "exec", env.ContainerName, "dokku", "plugin:list")
 		listOutput, listErr := pluginListCmd.CombinedOutput()
 		t.Logf("Plugin list: %s", string(listOutput))
 		if listErr != nil {
@@ -279,23 +296,26 @@ variable "ssh_private_key" {
 		}
 
 		// Check HTTP auth status for the app
-		authReportCmd := exec.Command("docker", "exec", containerName, "dokku", "http-auth:report", "demo")
+		authReportCmd := exec.Command("docker", "exec", env.ContainerName, "dokku", "http-auth:report", "demo")
 		authOutput, authErr := authReportCmd.CombinedOutput()
 		t.Logf("HTTP auth report: %s", string(authOutput))
 		if authErr != nil {
 			t.Logf("HTTP auth report error: %v", authErr)
 		}
 
-		// Check if users are configured
-		userListCmd := exec.Command("docker", "exec", containerName, "dokku", "http-auth:list", "demo")
-		userOutput, userErr := userListCmd.CombinedOutput()
-		t.Logf("HTTP auth users: %s", string(userOutput))
-		if userErr != nil {
-			t.Logf("HTTP auth user list error: %v", userErr)
+		// Validate HTTP auth configuration from the report output
+		if strings.Contains(string(authOutput), "Http auth enabled:             true") {
+			t.Logf("✓ HTTP auth is properly enabled")
+		} else {
+			t.Logf("⚠ HTTP auth may not be enabled")
+		}
+
+		if strings.Contains(string(authOutput), "Http auth users:") {
+			t.Logf("✓ HTTP auth users are configured")
 		}
 
 		// Check app status
-		appStatusCmd := exec.Command("docker", "exec", containerName, "dokku", "ps:report", "demo")
+		appStatusCmd := exec.Command("docker", "exec", env.ContainerName, "dokku", "ps:report", "demo")
 		statusOutput, statusErr := appStatusCmd.CombinedOutput()
 		t.Logf("App status: %s", string(statusOutput))
 		if statusErr != nil {
@@ -303,7 +323,7 @@ variable "ssh_private_key" {
 		}
 
 		// Check nginx config
-		nginxCheckCmd := exec.Command("docker", "exec", containerName, "ls", "-la", "/home/dokku/demo/nginx.conf.d/")
+		nginxCheckCmd := exec.Command("docker", "exec", env.ContainerName, "ls", "-la", "/home/dokku/demo/nginx.conf.d/")
 		nginxOutput, nginxErr := nginxCheckCmd.CombinedOutput()
 		t.Logf("Nginx config directory: %s", string(nginxOutput))
 		if nginxErr != nil {
@@ -314,10 +334,10 @@ variable "ssh_private_key" {
 	})
 
 	test_structure.RunTestStage(t, "destroy_terraform", func() {
-		destroyTerraform(t, testDir)
+		terraformOptions := test_structure.LoadTerraformOptions(t, testDir)
+		terraform.Destroy(t, terraformOptions)
 	})
 
-	test_structure.RunTestStage(t, "cleanup_docker", func() {
-		cleanupDocker(t)
-	})
+	// Note: Final cleanup is handled by the defer statement at the beginning
+	// which calls cleanupTestEnvironment(t, env)
 }

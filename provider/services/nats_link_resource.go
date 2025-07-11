@@ -2,9 +2,11 @@ package services
 
 import (
 	"context"
+	"fmt"
 	"regexp"
 	"strings"
 
+	"github.com/aliksend/terraform-provider-dokku/internal/config"
 	dokkuclient "github.com/aliksend/terraform-provider-dokku/provider/dokku_client"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
@@ -28,7 +30,7 @@ func NewNatsLinkResource() resource.Resource {
 }
 
 type natsLinkResource struct {
-	client *dokkuclient.Client
+	config *config.DokkuConfig
 }
 
 type natsLinkResourceModel struct {
@@ -42,14 +44,22 @@ func (r *natsLinkResource) Metadata(_ context.Context, req resource.MetadataRequ
 	resp.TypeName = req.ProviderTypeName + "_nats_link"
 }
 
-// Configure adds the provider configured client to the resource.
-func (r *natsLinkResource) Configure(_ context.Context, req resource.ConfigureRequest, _ *resource.ConfigureResponse) {
+// Configure adds the provider configured config to the resource.
+func (r *natsLinkResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
 	if req.ProviderData == nil {
 		return
 	}
 
-	//nolint:forcetypeassert
-	r.client = req.ProviderData.(*dokkuclient.Client)
+	config, ok := req.ProviderData.(*config.DokkuConfig)
+	if !ok {
+		resp.Diagnostics.AddError(
+			"Unexpected Resource Configure Type",
+			fmt.Sprintf("Expected *config.DokkuConfig, got: %T", req.ProviderData),
+		)
+		return
+	}
+
+	r.config = config
 }
 
 // Schema defines the schema for the resource.
@@ -100,8 +110,16 @@ func (r *natsLinkResource) Read(ctx context.Context, req resource.ReadRequest, r
 		return
 	}
 
+	// Create SSH connection on-demand
+	client, err := r.config.NewClient(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("SSH connection failed", err.Error())
+		return
+	}
+	defer r.config.CloseClient(client)
+
 	// Check service existence
-	exists, err := r.client.SimpleServiceExists(ctx, "nats", state.ServiceName.ValueString())
+	exists, err := client.SimpleServiceExists(ctx, "nats", state.ServiceName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to check nats service existence", "Unable to check nats service existence. "+err.Error())
 		return
@@ -112,7 +130,7 @@ func (r *natsLinkResource) Read(ctx context.Context, req resource.ReadRequest, r
 	}
 
 	// Check link existence
-	exists, err = r.client.SimpleServiceLinkExists(ctx, "nats", state.ServiceName.ValueString(), state.AppName.ValueString())
+	exists, err = client.SimpleServiceLinkExists(ctx, "nats", state.ServiceName.ValueString(), state.AppName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to check nats link existence", "Unable to check nats link existence. "+err.Error())
 		return
@@ -140,8 +158,16 @@ func (r *natsLinkResource) Create(ctx context.Context, req resource.CreateReques
 		return
 	}
 
+	// Create SSH connection on-demand
+	client, err := r.config.NewClient(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("SSH connection failed", err.Error())
+		return
+	}
+	defer r.config.CloseClient(client)
+
 	// Check service existence
-	exists, err := r.client.SimpleServiceExists(ctx, "nats", plan.ServiceName.ValueString())
+	exists, err := client.SimpleServiceExists(ctx, "nats", plan.ServiceName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to check nats service existence", "Unable to check nats service existence. "+err.Error())
 		return
@@ -152,7 +178,7 @@ func (r *natsLinkResource) Create(ctx context.Context, req resource.CreateReques
 	}
 
 	// Check link existence
-	exists, err = r.client.SimpleServiceLinkExists(ctx, "nats", plan.ServiceName.ValueString(), plan.AppName.ValueString())
+	exists, err = client.SimpleServiceLinkExists(ctx, "nats", plan.ServiceName.ValueString(), plan.AppName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to check nats link existence", "Unable to check nats link existence. "+err.Error())
 		return
@@ -168,7 +194,7 @@ func (r *natsLinkResource) Create(ctx context.Context, req resource.CreateReques
 	}
 
 	// Create link
-	err = r.client.SimpleServiceLinkCreate(ctx, "nats", plan.ServiceName.ValueString(), plan.AppName.ValueString(), args...)
+	err = client.SimpleServiceLinkCreate(ctx, "nats", plan.ServiceName.ValueString(), plan.AppName.ValueString(), args...)
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to create nats link", "Unable to create nats link. "+err.Error())
 		return
@@ -197,8 +223,16 @@ func (r *natsLinkResource) Delete(ctx context.Context, req resource.DeleteReques
 		return
 	}
 
+	// Create SSH connection on-demand
+	client, err := r.config.NewClient(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("SSH connection failed", err.Error())
+		return
+	}
+	defer r.config.CloseClient(client)
+
 	// Check service existence
-	exists, err := r.client.SimpleServiceExists(ctx, "nats", state.ServiceName.ValueString())
+	exists, err := client.SimpleServiceExists(ctx, "nats", state.ServiceName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to check nats service existence", "Unable to check nats service existence. "+err.Error())
 		return
@@ -208,7 +242,7 @@ func (r *natsLinkResource) Delete(ctx context.Context, req resource.DeleteReques
 	}
 
 	// Check link existence
-	exists, err = r.client.SimpleServiceLinkExists(ctx, "nats", state.ServiceName.ValueString(), state.AppName.ValueString())
+	exists, err = client.SimpleServiceLinkExists(ctx, "nats", state.ServiceName.ValueString(), state.AppName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to check nats link existence", "Unable to check nats link existence. "+err.Error())
 		return
@@ -218,7 +252,7 @@ func (r *natsLinkResource) Delete(ctx context.Context, req resource.DeleteReques
 	}
 
 	// Unlink service
-	err = r.client.SimpleServiceLinkRemove(ctx, "nats", state.ServiceName.ValueString(), state.AppName.ValueString())
+	err = client.SimpleServiceLinkRemove(ctx, "nats", state.ServiceName.ValueString(), state.AppName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to unlink service from app", "Unable to unlink service from app. "+err.Error())
 		return

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"regexp"
 
-	dokkuclient "github.com/aliksend/terraform-provider-dokku/provider/dokku_client"
+	"github.com/aliksend/terraform-provider-dokku/internal/config"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/path"
@@ -29,7 +29,7 @@ func NewRethinkDBResource() resource.Resource {
 }
 
 type rethinkDBResource struct {
-	client *dokkuclient.Client
+	config *config.DokkuConfig
 }
 
 type rethinkDBResourceModel struct {
@@ -43,14 +43,22 @@ func (r *rethinkDBResource) Metadata(_ context.Context, req resource.MetadataReq
 	resp.TypeName = req.ProviderTypeName + "_rethinkdb"
 }
 
-// Configure adds the provider configured client to the resource.
-func (r *rethinkDBResource) Configure(_ context.Context, req resource.ConfigureRequest, _ *resource.ConfigureResponse) {
+// Configure adds the provider configured config to the resource.
+func (r *rethinkDBResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
 	if req.ProviderData == nil {
 		return
 	}
 
-	//nolint:forcetypeassert
-	r.client = req.ProviderData.(*dokkuclient.Client)
+	config, ok := req.ProviderData.(*config.DokkuConfig)
+	if !ok {
+		resp.Diagnostics.AddError(
+			"Unexpected Resource Configure Type",
+			fmt.Sprintf("Expected *config.DokkuConfig, got: %T", req.ProviderData),
+		)
+		return
+	}
+
+	r.config = config
 }
 
 // Schema defines the schema for the resource.
@@ -99,8 +107,16 @@ func (r *rethinkDBResource) Read(ctx context.Context, req resource.ReadRequest, 
 		return
 	}
 
+	// Create SSH connection on-demand
+	client, err := r.config.NewClient(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("SSH connection failed", err.Error())
+		return
+	}
+	defer r.config.CloseClient(client)
+
 	// Check service existence
-	exists, err := r.client.SimpleServiceExists(ctx, "rethinkdb", state.ServiceName.ValueString())
+	exists, err := client.SimpleServiceExists(ctx, "rethinkdb", state.ServiceName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to check rethinkDB service existence", "Unable to check rethinkDB service existence. "+err.Error())
 		return
@@ -110,7 +126,7 @@ func (r *rethinkDBResource) Read(ctx context.Context, req resource.ReadRequest, 
 		return
 	}
 
-	info, err := r.client.SimpleServiceInfo(ctx, "rethinkdb", state.ServiceName.ValueString())
+	info, err := client.SimpleServiceInfo(ctx, "rethinkdb", state.ServiceName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to get rethinkdb service info", "Unable to get rethinkdb service info. "+err.Error())
 		return
@@ -149,8 +165,16 @@ func (r *rethinkDBResource) Create(ctx context.Context, req resource.CreateReque
 		return
 	}
 
+	// Create SSH connection on-demand
+	client, err := r.config.NewClient(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("SSH connection failed", err.Error())
+		return
+	}
+	defer r.config.CloseClient(client)
+
 	// Create service is not exists
-	exists, err := r.client.SimpleServiceExists(ctx, "rethinkdb", plan.ServiceName.ValueString())
+	exists, err := client.SimpleServiceExists(ctx, "rethinkdb", plan.ServiceName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to check rethinkDB service existence", "Unable to check rethinkDB service existence. "+err.Error())
 		return
@@ -172,14 +196,14 @@ func (r *rethinkDBResource) Create(ctx context.Context, req resource.CreateReque
 		}
 	}
 
-	err = r.client.SimpleServiceCreate(ctx, "rethinkdb", plan.ServiceName.ValueString())
+	err = client.SimpleServiceCreate(ctx, "rethinkdb", plan.ServiceName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to create rethinkDB service", "Unable to create rethinkDB service. "+err.Error())
 		return
 	}
 
 	if !plan.Expose.IsNull() {
-		err := r.client.SimpleServiceExpose(ctx, "rethinkdb", plan.ServiceName.ValueString(), plan.Expose.ValueString())
+		err := client.SimpleServiceExpose(ctx, "rethinkdb", plan.ServiceName.ValueString(), plan.Expose.ValueString())
 		if err != nil {
 			resp.Diagnostics.AddError("Unable to expose rethinkdb service", "Unable to expose rethinkdb service. "+err.Error())
 			return
@@ -214,22 +238,30 @@ func (r *rethinkDBResource) Update(ctx context.Context, req resource.UpdateReque
 		resp.Diagnostics.AddError("service_name can't be changed", "service_name can't be changed")
 	}
 
+	// Create SSH connection on-demand
+	client, err := r.config.NewClient(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("SSH connection failed", err.Error())
+		return
+	}
+	defer r.config.CloseClient(client)
+
 	if !plan.Expose.IsNull() {
 		if !plan.Expose.Equal(state.Expose) {
-			err := r.client.SimpleServiceUnexpose(ctx, "rethinkdb", state.ServiceName.ValueString())
+			err := client.SimpleServiceUnexpose(ctx, "rethinkdb", state.ServiceName.ValueString())
 			if err != nil {
 				resp.Diagnostics.AddError("Unable to unexpose rethinkdb service", "Unable to unexpose rethinkdb service. "+err.Error())
 				return
 			}
 
-			err = r.client.SimpleServiceExpose(ctx, "rethinkdb", plan.ServiceName.ValueString(), plan.Expose.ValueString())
+			err = client.SimpleServiceExpose(ctx, "rethinkdb", plan.ServiceName.ValueString(), plan.Expose.ValueString())
 			if err != nil {
 				resp.Diagnostics.AddError("Unable to expose rethinkdb service", "Unable to expose rethinkdb service. "+err.Error())
 				return
 			}
 		}
 	} else if !state.Expose.IsNull() {
-		err := r.client.SimpleServiceUnexpose(ctx, "rethinkdb", state.ServiceName.ValueString())
+		err := client.SimpleServiceUnexpose(ctx, "rethinkdb", state.ServiceName.ValueString())
 		if err != nil {
 			resp.Diagnostics.AddError("Unable to unexpose rethinkdb service", "Unable to unexpose rethinkdb service. "+err.Error())
 			return
@@ -257,8 +289,16 @@ func (r *rethinkDBResource) Delete(ctx context.Context, req resource.DeleteReque
 		return
 	}
 
+	// Create SSH connection on-demand
+	client, err := r.config.NewClient(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("SSH connection failed", err.Error())
+		return
+	}
+	defer r.config.CloseClient(client)
+
 	// Check service existence
-	exists, err := r.client.SimpleServiceExists(ctx, "rethinkdb", state.ServiceName.ValueString())
+	exists, err := client.SimpleServiceExists(ctx, "rethinkdb", state.ServiceName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to check rethinkDB service existence", "Unable to check rethinkDB service existence. "+err.Error())
 		return
@@ -268,7 +308,7 @@ func (r *rethinkDBResource) Delete(ctx context.Context, req resource.DeleteReque
 	}
 
 	// Destroy instance
-	err = r.client.SimpleServiceDestroy(ctx, "rethinkdb", state.ServiceName.ValueString())
+	err = client.SimpleServiceDestroy(ctx, "rethinkdb", state.ServiceName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to destroy service", "Unable to destroy service. "+err.Error())
 		return

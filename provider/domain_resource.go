@@ -2,10 +2,10 @@ package provider
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
-	dokkuclient "github.com/aliksend/terraform-provider-dokku/provider/dokku_client"
-
+	"github.com/aliksend/terraform-provider-dokku/internal/config"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -27,7 +27,7 @@ func NewDomainResource() resource.Resource {
 }
 
 type domainResource struct {
-	client *dokkuclient.Client
+	config *config.DokkuConfig
 }
 
 type domainResourceModel struct {
@@ -39,14 +39,22 @@ func (r *domainResource) Metadata(_ context.Context, req resource.MetadataReques
 	resp.TypeName = req.ProviderTypeName + "_domain"
 }
 
-// Configure adds the provider configured client to the resource.
-func (r *domainResource) Configure(_ context.Context, req resource.ConfigureRequest, _ *resource.ConfigureResponse) {
+// Configure adds the provider configured config to the resource.
+func (r *domainResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
 	if req.ProviderData == nil {
 		return
 	}
 
-	//nolint:forcetypeassert
-	r.client = req.ProviderData.(*dokkuclient.Client)
+	config, ok := req.ProviderData.(*config.DokkuConfig)
+	if !ok {
+		resp.Diagnostics.AddError(
+			"Unexpected Resource Configure Type",
+			fmt.Sprintf("Expected *config.DokkuConfig, got: %T", req.ProviderData),
+		)
+		return
+	}
+
+	r.config = config
 }
 
 // Schema defines the schema for the resource.
@@ -82,8 +90,16 @@ func (r *domainResource) Read(ctx context.Context, req resource.ReadRequest, res
 		return
 	}
 
+	// Create SSH connection on-demand
+	client, err := r.config.NewClient(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("SSH connection failed", err.Error())
+		return
+	}
+	defer r.config.CloseClient(client)
+
 	// Read domains
-	exists, err := r.client.GlobalDomainExists(ctx, state.Domain.ValueString())
+	exists, err := client.GlobalDomainExists(ctx, state.Domain.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to check global domain existence", "Unable to check global domain existence. "+err.Error())
 		return
@@ -111,8 +127,16 @@ func (r *domainResource) Create(ctx context.Context, req resource.CreateRequest,
 		return
 	}
 
+	// Create SSH connection on-demand
+	client, err := r.config.NewClient(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("SSH connection failed", err.Error())
+		return
+	}
+	defer r.config.CloseClient(client)
+
 	// Read domains
-	exists, err := r.client.GlobalDomainExists(ctx, plan.Domain.ValueString())
+	exists, err := client.GlobalDomainExists(ctx, plan.Domain.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to check global domain existence", "Unable to check global domain existence. "+err.Error())
 		return
@@ -123,7 +147,7 @@ func (r *domainResource) Create(ctx context.Context, req resource.CreateRequest,
 	}
 
 	// Add domain
-	err = r.client.GlobalDomainAdd(ctx, plan.Domain.ValueString())
+	err = client.GlobalDomainAdd(ctx, plan.Domain.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to add global domain", "Unable to add global domain. "+err.Error())
 		return
@@ -152,8 +176,16 @@ func (r *domainResource) Delete(ctx context.Context, req resource.DeleteRequest,
 		return
 	}
 
+	// Create SSH connection on-demand
+	client, err := r.config.NewClient(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("SSH connection failed", err.Error())
+		return
+	}
+	defer r.config.CloseClient(client)
+
 	// Read domains
-	exists, err := r.client.GlobalDomainExists(ctx, state.Domain.ValueString())
+	exists, err := client.GlobalDomainExists(ctx, state.Domain.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to check global domain existence", "Unable to check global domain existence. "+err.Error())
 		return
@@ -163,7 +195,7 @@ func (r *domainResource) Delete(ctx context.Context, req resource.DeleteRequest,
 	}
 
 	// Clear domains
-	err = r.client.GlobalDomainRemove(ctx, state.Domain.ValueString())
+	err = client.GlobalDomainRemove(ctx, state.Domain.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to remove global domain", "Unable to remove global domain. "+err.Error())
 		return

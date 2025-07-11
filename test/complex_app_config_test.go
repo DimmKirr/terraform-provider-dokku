@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -15,7 +16,7 @@ import (
 )
 
 func TestComplexAppConfig(t *testing.T) {
-	// Removed t.Parallel() due to Docker container name conflicts
+	t.Parallel()
 	// This test uses properly typed variables with Terraform merge() function and validates
 	// that provider handles complex HCL types correctly and sets expected environment variables
 
@@ -23,18 +24,25 @@ func TestComplexAppConfig(t *testing.T) {
 	sourceDir := filepath.Join("test", "complex_app_config")
 	testDir := test_structure.CopyTerraformFolderToTemp(t, "../", sourceDir)
 
-	// Generate SSH keys first
-	var sshKeys *testSSHKeys
+	// Create isolated test environment
+	var env *testEnvironment
 	test_structure.RunTestStage(t, "generate_ssh_keys", func() {
-		sshKeys = generateSSHKeys(t, testDir)
+		env = createTestEnvironment(t, testDir)
 	})
 
+	// Ensure cleanup runs regardless of test outcome
+	defer func() {
+		if env != nil {
+			cleanupTestEnvironment(t, env)
+		}
+	}()
+
 	test_structure.RunTestStage(t, "setup_docker", func() {
-		setupDokkuContainer(t)
+		setupDokkuContainer(t, env)
 	})
 
 	test_structure.RunTestStage(t, "setup_ssh", func() {
-		setupSSH(t, sshKeys)
+		setupSSH(t, env)
 	})
 
 	test_structure.RunTestStage(t, "apply_terraform", func() {
@@ -46,11 +54,14 @@ func TestComplexAppConfig(t *testing.T) {
 		// Define test-specific configuration inline
 		appName := "complex-test-app"
 
-		// Base terraform options
+		// Base terraform options using environment-specific settings
+		sshPort, err := strconv.Atoi(env.ExternalPorts["ssh"])
+		require.NoError(t, err, "Failed to parse SSH port")
+
 		vars := map[string]interface{}{
 			"dokku_host":      "localhost",
-			"dokku_port":      3022,
-			"ssh_private_key": sshKeys.privateKeyPEM,
+			"dokku_port":      sshPort,
+			"ssh_private_key": env.SSHKeys.privateKeyPEM,
 			"app_name":        appName,
 			"app_config": map[string]interface{}{
 				"ENV":      "prod",
@@ -134,15 +145,19 @@ func TestComplexAppConfig(t *testing.T) {
 		appName := "complex-test-app"
 
 		keyPair := &ssh.KeyPair{
-			PublicKey:  sshKeys.publicKeySSH,
-			PrivateKey: sshKeys.privateKeyPEM,
+			PublicKey:  env.SSHKeys.publicKeySSH,
+			PrivateKey: env.SSHKeys.privateKeyPEM,
 		}
+
+		// Convert external port string to int
+		customPort, err := strconv.Atoi(env.ExternalPorts["ssh"])
+		require.NoError(t, err, "Failed to parse SSH port")
 
 		host := ssh.Host{
 			Hostname:    "localhost",
 			SshKeyPair:  keyPair,
 			SshUserName: "dokku",
-			CustomPort:  3022,
+			CustomPort:  customPort,
 		}
 
 		// Test SSH connection first with a retry mechanism
@@ -257,7 +272,6 @@ func TestComplexAppConfig(t *testing.T) {
 		}
 	})
 
-	test_structure.RunTestStage(t, "cleanup_docker", func() {
-		cleanupDocker(t)
-	})
+	// Note: Final cleanup is handled by the defer statement at the beginning
+	// which calls cleanupTestEnvironment(t, env)
 }

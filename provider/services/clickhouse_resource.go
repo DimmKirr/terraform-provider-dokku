@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"regexp"
 
-	dokkuclient "github.com/aliksend/terraform-provider-dokku/provider/dokku_client"
+	"github.com/aliksend/terraform-provider-dokku/internal/config"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/path"
@@ -29,7 +29,7 @@ func NewClickhouseResource() resource.Resource {
 }
 
 type clickhouseResource struct {
-	client *dokkuclient.Client
+	config *config.DokkuConfig
 }
 
 type clickhouseResourceModel struct {
@@ -43,14 +43,22 @@ func (r *clickhouseResource) Metadata(_ context.Context, req resource.MetadataRe
 	resp.TypeName = req.ProviderTypeName + "_clickhouse"
 }
 
-// Configure adds the provider configured client to the resource.
-func (r *clickhouseResource) Configure(_ context.Context, req resource.ConfigureRequest, _ *resource.ConfigureResponse) {
+// Configure adds the provider configured config to the resource.
+func (r *clickhouseResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
 	if req.ProviderData == nil {
 		return
 	}
 
-	//nolint:forcetypeassert
-	r.client = req.ProviderData.(*dokkuclient.Client)
+	config, ok := req.ProviderData.(*config.DokkuConfig)
+	if !ok {
+		resp.Diagnostics.AddError(
+			"Unexpected Resource Configure Type",
+			fmt.Sprintf("Expected *config.DokkuConfig, got: %T", req.ProviderData),
+		)
+		return
+	}
+
+	r.config = config
 }
 
 // Schema defines the schema for the resource.
@@ -99,8 +107,16 @@ func (r *clickhouseResource) Read(ctx context.Context, req resource.ReadRequest,
 		return
 	}
 
+	// Create SSH connection on-demand
+	client, err := r.config.NewClient(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("SSH connection failed", err.Error())
+		return
+	}
+	defer r.config.CloseClient(client)
+
 	// Check service existence
-	exists, err := r.client.SimpleServiceExists(ctx, "clickhouse", state.ServiceName.ValueString())
+	exists, err := client.SimpleServiceExists(ctx, "clickhouse", state.ServiceName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to check clickhouse service existence", "Unable to check clickhouse service existence. "+err.Error())
 		return
@@ -110,7 +126,7 @@ func (r *clickhouseResource) Read(ctx context.Context, req resource.ReadRequest,
 		return
 	}
 
-	info, err := r.client.SimpleServiceInfo(ctx, "clickhouse", state.ServiceName.ValueString())
+	info, err := client.SimpleServiceInfo(ctx, "clickhouse", state.ServiceName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to get clickhouse service info", "Unable to get clickhouse service info. "+err.Error())
 		return
@@ -149,8 +165,16 @@ func (r *clickhouseResource) Create(ctx context.Context, req resource.CreateRequ
 		return
 	}
 
+	// Create SSH connection on-demand
+	client, err := r.config.NewClient(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("SSH connection failed", err.Error())
+		return
+	}
+	defer r.config.CloseClient(client)
+
 	// Create service is not exists
-	exists, err := r.client.SimpleServiceExists(ctx, "clickhouse", plan.ServiceName.ValueString())
+	exists, err := client.SimpleServiceExists(ctx, "clickhouse", plan.ServiceName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to check clickhouse service existence", "Unable to check clickhouse service existence. "+err.Error())
 		return
@@ -172,14 +196,14 @@ func (r *clickhouseResource) Create(ctx context.Context, req resource.CreateRequ
 		}
 	}
 
-	err = r.client.SimpleServiceCreate(ctx, "clickhouse", plan.ServiceName.ValueString(), args...)
+	err = client.SimpleServiceCreate(ctx, "clickhouse", plan.ServiceName.ValueString(), args...)
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to create clickhouse service", "Unable to create clickhouse service. "+err.Error())
 		return
 	}
 
 	if !plan.Expose.IsNull() {
-		err := r.client.SimpleServiceExpose(ctx, "clickhouse", plan.ServiceName.ValueString(), plan.Expose.ValueString())
+		err := client.SimpleServiceExpose(ctx, "clickhouse", plan.ServiceName.ValueString(), plan.Expose.ValueString())
 		if err != nil {
 			resp.Diagnostics.AddError("Unable to expose clickhouse service", "Unable to expose clickhouse service. "+err.Error())
 			return
@@ -210,26 +234,34 @@ func (r *clickhouseResource) Update(ctx context.Context, req resource.UpdateRequ
 		return
 	}
 
+	// Create SSH connection on-demand
+	client, err := r.config.NewClient(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("SSH connection failed", err.Error())
+		return
+	}
+	defer r.config.CloseClient(client)
+
 	if plan.ServiceName.ValueString() != state.ServiceName.ValueString() {
 		resp.Diagnostics.AddError("service_name can't be changed", "service_name can't be changed")
 	}
 
 	if !plan.Expose.IsNull() {
 		if !plan.Expose.Equal(state.Expose) {
-			err := r.client.SimpleServiceUnexpose(ctx, "clickhouse", state.ServiceName.ValueString())
+			err := client.SimpleServiceUnexpose(ctx, "clickhouse", state.ServiceName.ValueString())
 			if err != nil {
 				resp.Diagnostics.AddError("Unable to unexpose clickhouse service", "Unable to unexpose clickhouse service. "+err.Error())
 				return
 			}
 
-			err = r.client.SimpleServiceExpose(ctx, "clickhouse", plan.ServiceName.ValueString(), plan.Expose.ValueString())
+			err = client.SimpleServiceExpose(ctx, "clickhouse", plan.ServiceName.ValueString(), plan.Expose.ValueString())
 			if err != nil {
 				resp.Diagnostics.AddError("Unable to expose clickhouse service", "Unable to expose clickhouse service. "+err.Error())
 				return
 			}
 		}
 	} else if !state.Expose.IsNull() {
-		err := r.client.SimpleServiceUnexpose(ctx, "clickhouse", state.ServiceName.ValueString())
+		err := client.SimpleServiceUnexpose(ctx, "clickhouse", state.ServiceName.ValueString())
 		if err != nil {
 			resp.Diagnostics.AddError("Unable to unexpose clickhouse service", "Unable to unexpose clickhouse service. "+err.Error())
 			return
@@ -257,8 +289,16 @@ func (r *clickhouseResource) Delete(ctx context.Context, req resource.DeleteRequ
 		return
 	}
 
+	// Create SSH connection on-demand
+	client, err := r.config.NewClient(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("SSH connection failed", err.Error())
+		return
+	}
+	defer r.config.CloseClient(client)
+
 	// Check service existence
-	exists, err := r.client.SimpleServiceExists(ctx, "clickhouse", state.ServiceName.ValueString())
+	exists, err := client.SimpleServiceExists(ctx, "clickhouse", state.ServiceName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to check clickhouse service existence", "Unable to check clickhouse service existence. "+err.Error())
 		return
@@ -268,7 +308,7 @@ func (r *clickhouseResource) Delete(ctx context.Context, req resource.DeleteRequ
 	}
 
 	// Destroy instance
-	err = r.client.SimpleServiceDestroy(ctx, "clickhouse", state.ServiceName.ValueString())
+	err = client.SimpleServiceDestroy(ctx, "clickhouse", state.ServiceName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to destroy service", "Unable to destroy service. "+err.Error())
 		return

@@ -1,8 +1,11 @@
 package test
 
 import (
+	"fmt"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,35 +17,47 @@ import (
 )
 
 func TestSimple(t *testing.T) {
-	// Removed t.Parallel() due to Docker container name conflicts
+	t.Parallel()
 
 	// Copy the specific test subdirectory
 	sourceDir := filepath.Join("test", "simple")
 	testDir := test_structure.CopyTerraformFolderToTemp(t, "../", sourceDir)
 
-	// Generate SSH keys first
-	var sshKeys *testSSHKeys
+	// Create isolated test environment
+	var env *testEnvironment
 	test_structure.RunTestStage(t, "generate_ssh_keys", func() {
-		sshKeys = generateSSHKeys(t, testDir)
+		env = createTestEnvironment(t, testDir)
 	})
 
+	// Ensure cleanup runs regardless of test outcome
+	defer func() {
+		if env != nil {
+			cleanupTestEnvironment(t, env)
+		}
+	}()
+
 	test_structure.RunTestStage(t, "setup_docker", func() {
-		setupDokkuContainer(t)
+		setupDokkuContainer(t, env)
 	})
 
 	test_structure.RunTestStage(t, "setup_ssh", func() {
-		setupSSH(t, sshKeys)
+		setupSSH(t, env)
 	})
 
 	test_structure.RunTestStage(t, "apply_terraform", func() {
 		// Define test-specific configuration inline
-		appName := "simple-test-app"
+		// Convert to lowercase and clean up the name for Dokku compatibility
+		testName := strings.ToLower(strings.ReplaceAll(t.Name(), "/", "-"))
+		appName := fmt.Sprintf("simple-test-%s", testName)
 
-		// Base terraform options
+		// Base terraform options using environment-specific settings
+		sshPort, err := strconv.Atoi(env.ExternalPorts["ssh"])
+		require.NoError(t, err, "Failed to parse SSH port")
+
 		vars := map[string]interface{}{
 			"dokku_host":      "localhost",
-			"dokku_port":      3022,
-			"ssh_private_key": sshKeys.privateKeyPEM,
+			"dokku_port":      sshPort,
+			"ssh_private_key": env.SSHKeys.privateKeyPEM,
 			"app_name":        appName,
 		}
 
@@ -66,34 +81,43 @@ func TestSimple(t *testing.T) {
 	})
 
 	test_structure.RunTestStage(t, "validate_dokku", func() {
-		appName := "simple-test-app"
+		// Convert to lowercase and clean up the name for Dokku compatibility
+		testName := strings.ToLower(strings.ReplaceAll(t.Name(), "/", "-"))
+		appName := fmt.Sprintf("simple-test-%s", testName)
 
 		keyPair := &ssh.KeyPair{
-			PublicKey:  sshKeys.publicKeySSH,
-			PrivateKey: sshKeys.privateKeyPEM,
+			PublicKey:  env.SSHKeys.publicKeySSH,
+			PrivateKey: env.SSHKeys.privateKeyPEM,
 		}
+
+		// Convert external port string to int
+		customPort, err := strconv.Atoi(env.ExternalPorts["ssh"])
+		require.NoError(t, err, "Failed to parse SSH port")
 
 		host := ssh.Host{
 			Hostname:    "localhost",
 			SshKeyPair:  keyPair,
 			SshUserName: "dokku",
-			CustomPort:  3022,
+			CustomPort:  customPort,
 		}
 
 		validateSimpleApp(t, host, appName)
 	})
 
 	test_structure.RunTestStage(t, "validate_http", func() {
-		// Test HTTP accessibility
+		// Test HTTP accessibility using the environment's external HTTP port
 		maxRetries := 10
 		retryInterval := 3 * time.Second
 
 		var httpResponse string
 		var httpErr error
 
+		httpPort := env.ExternalPorts["http"]
+		httpURL := fmt.Sprintf("http://localhost:%s", httpPort)
+
 		for i := 0; i < maxRetries; i++ {
 			// Use curl to test HTTP connectivity since the app should be accessible via the exposed port
-			curlCmd := exec.Command("curl", "-s", "-f", "http://localhost:8080")
+			curlCmd := exec.Command("curl", "-s", "-f", httpURL)
 			output, err := curlCmd.Output()
 
 			if err == nil {
@@ -113,7 +137,7 @@ func TestSimple(t *testing.T) {
 
 		// Verify the response contains expected content from jmalloc/echo-server
 		assert.Contains(t, httpResponse, "Request served by", "HTTP response should contain 'Request served by' indicating the echo-server container is serving content")
-		assert.Contains(t, httpResponse, "Host: localhost:8080", "HTTP response should show the app received the request on port 8080")
+		assert.Contains(t, httpResponse, fmt.Sprintf("Host: localhost:%s", httpPort), "HTTP response should show the app received the request on the correct port")
 
 		t.Logf("HTTP validation successful! Response preview: %.200s...", httpResponse)
 	})
@@ -123,7 +147,6 @@ func TestSimple(t *testing.T) {
 		terraform.Destroy(t, terraformOptions)
 	})
 
-	test_structure.RunTestStage(t, "cleanup_docker", func() {
-		cleanupDocker(t)
-	})
+	// Note: Final cleanup is handled by the defer statement at the beginning
+	// which calls cleanupTestEnvironment(t, env)
 }

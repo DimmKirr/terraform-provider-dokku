@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"regexp"
 
+	"github.com/aliksend/terraform-provider-dokku/internal/config"
 	dokkuclient "github.com/aliksend/terraform-provider-dokku/provider/dokku_client"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
@@ -29,7 +30,7 @@ func NewNatsResource() resource.Resource {
 }
 
 type natsResource struct {
-	client *dokkuclient.Client
+	config *config.DokkuConfig
 }
 
 type natsResourceModel struct {
@@ -44,14 +45,22 @@ func (r *natsResource) Metadata(_ context.Context, req resource.MetadataRequest,
 	resp.TypeName = req.ProviderTypeName + "_nats"
 }
 
-// Configure adds the provider configured client to the resource.
-func (r *natsResource) Configure(_ context.Context, req resource.ConfigureRequest, _ *resource.ConfigureResponse) {
+// Configure adds the provider configured config to the resource.
+func (r *natsResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
 	if req.ProviderData == nil {
 		return
 	}
 
-	//nolint:forcetypeassert
-	r.client = req.ProviderData.(*dokkuclient.Client)
+	config, ok := req.ProviderData.(*config.DokkuConfig)
+	if !ok {
+		resp.Diagnostics.AddError(
+			"Unexpected Resource Configure Type",
+			fmt.Sprintf("Expected *config.DokkuConfig, got: %T", req.ProviderData),
+		)
+		return
+	}
+
+	r.config = config
 }
 
 // Schema defines the schema for the resource.
@@ -110,8 +119,16 @@ func (r *natsResource) Read(ctx context.Context, req resource.ReadRequest, resp 
 		return
 	}
 
+	// Create SSH connection on-demand
+	client, err := r.config.NewClient(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("SSH connection failed", err.Error())
+		return
+	}
+	defer r.config.CloseClient(client)
+
 	// Check service existence
-	exists, err := r.client.SimpleServiceExists(ctx, "nats", state.ServiceName.ValueString())
+	exists, err := client.SimpleServiceExists(ctx, "nats", state.ServiceName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to check nats service existence", "Unable to check nats service existence. "+err.Error())
 		return
@@ -121,7 +138,7 @@ func (r *natsResource) Read(ctx context.Context, req resource.ReadRequest, resp 
 		return
 	}
 
-	info, err := r.client.SimpleServiceInfo(ctx, "nats", state.ServiceName.ValueString())
+	info, err := client.SimpleServiceInfo(ctx, "nats", state.ServiceName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to get nats service info", "Unable to get nats service info. "+err.Error())
 		return
@@ -165,8 +182,16 @@ func (r *natsResource) Create(ctx context.Context, req resource.CreateRequest, r
 		return
 	}
 
+	// Create SSH connection on-demand
+	client, err := r.config.NewClient(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("SSH connection failed", err.Error())
+		return
+	}
+	defer r.config.CloseClient(client)
+
 	// Create service is not exists
-	exists, err := r.client.SimpleServiceExists(ctx, "nats", plan.ServiceName.ValueString())
+	exists, err := client.SimpleServiceExists(ctx, "nats", plan.ServiceName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to check nats service existence", "Unable to check nats service existence. "+err.Error())
 		return
@@ -192,14 +217,14 @@ func (r *natsResource) Create(ctx context.Context, req resource.CreateRequest, r
 		args = append(args, dokkuclient.DoubleDashArg("config-options", plan.ConfigOptions))
 	}
 
-	err = r.client.SimpleServiceCreate(ctx, "nats", plan.ServiceName.ValueString(), args...)
+	err = client.SimpleServiceCreate(ctx, "nats", plan.ServiceName.ValueString(), args...)
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to create nats service", "Unable to create nats service. "+err.Error())
 		return
 	}
 
 	if !plan.Expose.IsNull() {
-		err := r.client.SimpleServiceExpose(ctx, "nats", plan.ServiceName.ValueString(), plan.Expose.ValueString())
+		err := client.SimpleServiceExpose(ctx, "nats", plan.ServiceName.ValueString(), plan.Expose.ValueString())
 		if err != nil {
 			resp.Diagnostics.AddError("Unable to expose nats service", "Unable to expose nats service. "+err.Error())
 			return
@@ -207,7 +232,7 @@ func (r *natsResource) Create(ctx context.Context, req resource.CreateRequest, r
 	}
 
 	// Read the service info to populate computed fields like image
-	info, err := r.client.SimpleServiceInfo(ctx, "nats", plan.ServiceName.ValueString())
+	info, err := client.SimpleServiceInfo(ctx, "nats", plan.ServiceName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to get nats service info", "Unable to get nats service info. "+err.Error())
 		return
@@ -247,22 +272,30 @@ func (r *natsResource) Update(ctx context.Context, req resource.UpdateRequest, r
 		resp.Diagnostics.AddError("service_name can't be changed", "service_name can't be changed")
 	}
 
+	// Create SSH connection on-demand
+	client, err := r.config.NewClient(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("SSH connection failed", err.Error())
+		return
+	}
+	defer r.config.CloseClient(client)
+
 	if !plan.Expose.IsNull() {
 		if !plan.Expose.Equal(state.Expose) {
-			err := r.client.SimpleServiceUnexpose(ctx, "nats", state.ServiceName.ValueString())
+			err := client.SimpleServiceUnexpose(ctx, "nats", state.ServiceName.ValueString())
 			if err != nil {
 				resp.Diagnostics.AddError("Unable to unexpose nats service", "Unable to unexpose nats service. "+err.Error())
 				return
 			}
 
-			err = r.client.SimpleServiceExpose(ctx, "nats", plan.ServiceName.ValueString(), plan.Expose.ValueString())
+			err = client.SimpleServiceExpose(ctx, "nats", plan.ServiceName.ValueString(), plan.Expose.ValueString())
 			if err != nil {
 				resp.Diagnostics.AddError("Unable to expose nats service", "Unable to expose nats service. "+err.Error())
 				return
 			}
 		}
 	} else if !state.Expose.IsNull() {
-		err := r.client.SimpleServiceUnexpose(ctx, "nats", state.ServiceName.ValueString())
+		err := client.SimpleServiceUnexpose(ctx, "nats", state.ServiceName.ValueString())
 		if err != nil {
 			resp.Diagnostics.AddError("Unable to unexpose nats service", "Unable to unexpose nats service. "+err.Error())
 			return
@@ -290,8 +323,16 @@ func (r *natsResource) Delete(ctx context.Context, req resource.DeleteRequest, r
 		return
 	}
 
+	// Create SSH connection on-demand
+	client, err := r.config.NewClient(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("SSH connection failed", err.Error())
+		return
+	}
+	defer r.config.CloseClient(client)
+
 	// Check service existence
-	exists, err := r.client.SimpleServiceExists(ctx, "nats", state.ServiceName.ValueString())
+	exists, err := client.SimpleServiceExists(ctx, "nats", state.ServiceName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to check nats service existence", "Unable to check nats service existence. "+err.Error())
 		return
@@ -301,7 +342,7 @@ func (r *natsResource) Delete(ctx context.Context, req resource.DeleteRequest, r
 	}
 
 	// Destroy instance
-	err = r.client.SimpleServiceDestroy(ctx, "nats", state.ServiceName.ValueString())
+	err = client.SimpleServiceDestroy(ctx, "nats", state.ServiceName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to destroy service", "Unable to destroy service. "+err.Error())
 		return

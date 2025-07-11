@@ -10,10 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	dokkuclient "github.com/aliksend/terraform-provider-dokku/provider/dokku_client"
+	configpkg "github.com/aliksend/terraform-provider-dokku/internal/config"
 	"github.com/aliksend/terraform-provider-dokku/provider/services"
-
-	"github.com/blang/semver"
 	"github.com/hashicorp/terraform-plugin-framework-validators/int64validator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
@@ -263,79 +261,38 @@ func (p *dokkuProvider) Configure(ctx context.Context, req provider.ConfigureReq
 		return
 	}
 
-	tflog.Debug(ctx, "cert", map[string]any{"path": sshCertPath})
+	tflog.Debug(ctx, "Provider configuration", map[string]any{"host": host, "port": port, "user": sshUsername})
 
-	sshAuth, err := goph.Key(sshCertPath, "")
-	if err != nil {
-		resp.Diagnostics.AddAttributeError(path.Root("ssh_cert"), "Unable to find cert for ssh", "Unable to find cert for ssh. "+err.Error())
-		return
-	}
-
-	tflog.Debug(ctx, "ssh connection", map[string]any{"host": host, "port": port, "user": sshUsername})
-
+	// Parse host key configuration
 	skipHostKeyCheck := false
 	if !config.SshSkipHostKeyCheck.IsNull() {
 		skipHostKeyCheck = config.SshSkipHostKeyCheck.ValueBool()
 	}
 
-	sshConfig := &goph.Config{
-		Auth:     sshAuth,
-		Addr:     host,
-		Port:     port,
-		User:     sshUsername,
-		Callback: verifyHost,
+	hostKey := ""
+	if !config.SshHostKey.IsNull() {
+		hostKey = config.SshHostKey.ValueString()
 	}
 
-	if skipHostKeyCheck {
-		sshConfig.Callback = ssh.InsecureIgnoreHostKey()
-	} else if !config.SshHostKey.IsNull() {
-		_, _, publicKey, _, _, err := ssh.ParseKnownHosts([]byte(config.SshHostKey.ValueString()))
-		if err != nil {
-			resp.Diagnostics.AddError("Unable to parse provided ssh_host_key", "Unable to parse provided ssh_host_key. "+err.Error())
-			return
-		}
-		sshConfig.Callback = ssh.FixedHostKey(publicKey)
+	// Create DokkuConfig for lazy connection establishment
+	dokkuConfig := &configpkg.DokkuConfig{
+		Host:             host,
+		Port:             port,
+		User:             sshUsername,
+		CertPath:         sshCertPath,
+		SkipHostKeyCheck: skipHostKeyCheck,
+		HostKey:          hostKey,
+		LogSshCommands:   logSshCommands,
+		UploadAppName:    uploadAppName,
+		UploadSplitBytes: uploadSplitBytes,
 	}
 
-	client, err := goph.NewConn(sshConfig)
-	if err != nil {
-		resp.Diagnostics.AddError("Unable to establish SSH connection", "Unable to establish SSH connection. "+err.Error())
-		return
-	}
+	tflog.Debug(ctx, "Provider configured for lazy SSH connections")
 
-	dokkuClient := dokkuclient.New(client, logSshCommands, uploadAppName, uploadSplitBytes)
-	rawVersion, version, err := dokkuClient.GetVersion(ctx)
-	if err != nil {
-		if err == dokkuclient.ErrInvalidUser {
-			resp.Diagnostics.AddError(err.Error(), err.Error())
-		} else {
-			resp.Diagnostics.AddError("unable go get dokku version", "unable go get dokku version")
-		}
-		return
-	}
-
-	testedVersions := ">=0.24.0 <= 0.34.7"
-	testedErrMsg := fmt.Sprintf("This provider has not been tested against Dokku version %s. Tested version range: %s", rawVersion, testedVersions)
-
-	if err == nil {
-		tflog.Debug(ctx, "host version", map[string]any{"version": version})
-
-		compat := semver.MustParseRange(testedVersions)
-
-		if !compat(version) {
-			resp.Diagnostics.AddWarning(testedErrMsg, testedErrMsg)
-		}
-	} else {
-		resp.Diagnostics.AddError("Unable to detect dokku version", "Unable to detect dokku version. "+err.Error())
-		return
-	}
-
-	tflog.Debug(ctx, "Connected!")
-
-	// Make the dokku client available during DataSource and Resource
-	// type Configure methods.
-	resp.DataSourceData = dokkuClient
-	resp.ResourceData = dokkuClient
+	// Make the dokku config available during DataSource and Resource
+	// type Configure methods - connections will be established on-demand
+	resp.DataSourceData = dokkuConfig
+	resp.ResourceData = dokkuConfig
 }
 
 func (p *dokkuProvider) Resources(ctx context.Context) []func() resource.Resource {

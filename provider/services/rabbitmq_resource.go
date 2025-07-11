@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"regexp"
 
-	dokkuclient "github.com/aliksend/terraform-provider-dokku/provider/dokku_client"
+	"github.com/aliksend/terraform-provider-dokku/internal/config"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/path"
@@ -29,7 +29,7 @@ func NewRabbitMQResource() resource.Resource {
 }
 
 type rabbitMQResource struct {
-	client *dokkuclient.Client
+	config *config.DokkuConfig
 }
 
 type rabbitMQResourceModel struct {
@@ -43,14 +43,22 @@ func (r *rabbitMQResource) Metadata(_ context.Context, req resource.MetadataRequ
 	resp.TypeName = req.ProviderTypeName + "_rabbitmq"
 }
 
-// Configure adds the provider configured client to the resource.
-func (r *rabbitMQResource) Configure(_ context.Context, req resource.ConfigureRequest, _ *resource.ConfigureResponse) {
+// Configure adds the provider configured config to the resource.
+func (r *rabbitMQResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
 	if req.ProviderData == nil {
 		return
 	}
 
-	//nolint:forcetypeassert
-	r.client = req.ProviderData.(*dokkuclient.Client)
+	config, ok := req.ProviderData.(*config.DokkuConfig)
+	if !ok {
+		resp.Diagnostics.AddError(
+			"Unexpected Resource Configure Type",
+			fmt.Sprintf("Expected *config.DokkuConfig, got: %T", req.ProviderData),
+		)
+		return
+	}
+
+	r.config = config
 }
 
 // Schema defines the schema for the resource.
@@ -99,8 +107,16 @@ func (r *rabbitMQResource) Read(ctx context.Context, req resource.ReadRequest, r
 		return
 	}
 
+	// Create SSH connection on-demand
+	client, err := r.config.NewClient(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("SSH connection failed", err.Error())
+		return
+	}
+	defer r.config.CloseClient(client)
+
 	// Check service existence
-	exists, err := r.client.SimpleServiceExists(ctx, "rabbitmq", state.ServiceName.ValueString())
+	exists, err := client.SimpleServiceExists(ctx, "rabbitmq", state.ServiceName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to check rabbitMQ service existence", "Unable to check rabbitMQ service existence. "+err.Error())
 		return
@@ -110,7 +126,7 @@ func (r *rabbitMQResource) Read(ctx context.Context, req resource.ReadRequest, r
 		return
 	}
 
-	info, err := r.client.SimpleServiceInfo(ctx, "rabbitmq", state.ServiceName.ValueString())
+	info, err := client.SimpleServiceInfo(ctx, "rabbitmq", state.ServiceName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to get rabbitmq service info", "Unable to get rabbitmq service info. "+err.Error())
 		return
@@ -149,8 +165,16 @@ func (r *rabbitMQResource) Create(ctx context.Context, req resource.CreateReques
 		return
 	}
 
+	// Create SSH connection on-demand
+	client, err := r.config.NewClient(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("SSH connection failed", err.Error())
+		return
+	}
+	defer r.config.CloseClient(client)
+
 	// Create service is not exists
-	exists, err := r.client.SimpleServiceExists(ctx, "rabbitmq", plan.ServiceName.ValueString())
+	exists, err := client.SimpleServiceExists(ctx, "rabbitmq", plan.ServiceName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to check rabbitMQ service existence", "Unable to check rabbitMQ service existence. "+err.Error())
 		return
@@ -172,14 +196,14 @@ func (r *rabbitMQResource) Create(ctx context.Context, req resource.CreateReques
 		}
 	}
 
-	err = r.client.SimpleServiceCreate(ctx, "rabbitmq", plan.ServiceName.ValueString())
+	err = client.SimpleServiceCreate(ctx, "rabbitmq", plan.ServiceName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to create rabbitMQ service", "Unable to create rabbitMQ service. "+err.Error())
 		return
 	}
 
 	if !plan.Expose.IsNull() {
-		err := r.client.SimpleServiceExpose(ctx, "rabbitmq", plan.ServiceName.ValueString(), plan.Expose.ValueString())
+		err := client.SimpleServiceExpose(ctx, "rabbitmq", plan.ServiceName.ValueString(), plan.Expose.ValueString())
 		if err != nil {
 			resp.Diagnostics.AddError("Unable to expose rabbitmq service", "Unable to expose rabbitmq service. "+err.Error())
 			return
@@ -214,22 +238,30 @@ func (r *rabbitMQResource) Update(ctx context.Context, req resource.UpdateReques
 		resp.Diagnostics.AddError("service_name can't be changed", "service_name can't be changed")
 	}
 
+	// Create SSH connection on-demand
+	client, err := r.config.NewClient(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("SSH connection failed", err.Error())
+		return
+	}
+	defer r.config.CloseClient(client)
+
 	if !plan.Expose.IsNull() {
 		if !plan.Expose.Equal(state.Expose) {
-			err := r.client.SimpleServiceUnexpose(ctx, "rabbitmq", state.ServiceName.ValueString())
+			err := client.SimpleServiceUnexpose(ctx, "rabbitmq", state.ServiceName.ValueString())
 			if err != nil {
 				resp.Diagnostics.AddError("Unable to unexpose rabbitmq service", "Unable to unexpose rabbitmq service. "+err.Error())
 				return
 			}
 
-			err = r.client.SimpleServiceExpose(ctx, "rabbitmq", plan.ServiceName.ValueString(), plan.Expose.ValueString())
+			err = client.SimpleServiceExpose(ctx, "rabbitmq", plan.ServiceName.ValueString(), plan.Expose.ValueString())
 			if err != nil {
 				resp.Diagnostics.AddError("Unable to expose rabbitmq service", "Unable to expose rabbitmq service. "+err.Error())
 				return
 			}
 		}
 	} else if !state.Expose.IsNull() {
-		err := r.client.SimpleServiceUnexpose(ctx, "rabbitmq", state.ServiceName.ValueString())
+		err := client.SimpleServiceUnexpose(ctx, "rabbitmq", state.ServiceName.ValueString())
 		if err != nil {
 			resp.Diagnostics.AddError("Unable to unexpose rabbitmq service", "Unable to unexpose rabbitmq service. "+err.Error())
 			return
@@ -257,8 +289,16 @@ func (r *rabbitMQResource) Delete(ctx context.Context, req resource.DeleteReques
 		return
 	}
 
+	// Create SSH connection on-demand
+	client, err := r.config.NewClient(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("SSH connection failed", err.Error())
+		return
+	}
+	defer r.config.CloseClient(client)
+
 	// Check service existence
-	exists, err := r.client.SimpleServiceExists(ctx, "rabbitmq", state.ServiceName.ValueString())
+	exists, err := client.SimpleServiceExists(ctx, "rabbitmq", state.ServiceName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to check rabbitMQ service existence", "Unable to check rabbitMQ service existence. "+err.Error())
 		return
@@ -268,7 +308,7 @@ func (r *rabbitMQResource) Delete(ctx context.Context, req resource.DeleteReques
 	}
 
 	// Destroy instance
-	err = r.client.SimpleServiceDestroy(ctx, "rabbitmq", state.ServiceName.ValueString())
+	err = client.SimpleServiceDestroy(ctx, "rabbitmq", state.ServiceName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to destroy service", "Unable to destroy service. "+err.Error())
 		return

@@ -32,7 +32,13 @@ func (c *Client) StorageExport(ctx context.Context, appName string) (res map[str
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
+		if !strings.Contains(line, ":") {
+			continue
+		}
 		parts := strings.Split(line, ":")
+		if len(parts) < 2 {
+			continue
+		}
 		hostpath := strings.TrimSpace(parts[0])
 		if len(hostpath) > len(hostStoragePrefix) && hostpath[:len(hostStoragePrefix)] == hostStoragePrefix {
 			res[hostpath[len(hostStoragePrefix):]] = parts[1]
