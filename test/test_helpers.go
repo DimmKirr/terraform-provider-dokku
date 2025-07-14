@@ -1,9 +1,11 @@
 package test
 
 import (
+	"crypto/md5"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
+	"encoding/binary"
 	"encoding/pem"
 	"fmt"
 	"net"
@@ -61,19 +63,29 @@ func createTestEnvironment(t *testing.T, testDir string) *testEnvironment {
 	containerName := fmt.Sprintf("dokku-test-%s-%d", testName, timestamp)
 	networkName := fmt.Sprintf("network-%s-%d", testName, timestamp)
 
-	// Create Docker network for test isolation
-	createNetworkCmd := exec.Command("docker", "network", "create", networkName)
-	if err := createNetworkCmd.Run(); err != nil {
-		t.Logf("Warning: Failed to create network %s: %v", networkName, err)
-		// Continue without custom network - tests will use default bridge
+	// Check if we're in a CI environment (GitHub Actions)
+	isCI := os.Getenv("CI") == "true" || os.Getenv("GITHUB_ACTIONS") == "true"
+
+	if isCI {
+		// In CI environments, skip custom network creation to avoid network isolation issues
+		// between Dokku container and app containers that Dokku creates
+		t.Logf("CI environment detected, skipping custom network creation to prevent isolation issues")
 		networkName = ""
 	} else {
-		t.Logf("Created Docker network: %s", networkName)
+		// Create Docker network for test isolation in local development
+		createNetworkCmd := exec.Command("docker", "network", "create", networkName)
+		if err := createNetworkCmd.Run(); err != nil {
+			t.Logf("Warning: Failed to create network %s: %v", networkName, err)
+			// Continue without custom network - tests will use default bridge
+			networkName = ""
+		} else {
+			t.Logf("Created Docker network: %s", networkName)
+		}
 	}
 
 	// Generate dynamic external ports to avoid conflicts
-	sshPort := findAvailablePort(t)
-	httpPort := findAvailablePort(t)
+	sshPort := findAvailablePort(t, "ssh")
+	httpPort := findAvailablePort(t, "http")
 
 	// Generate SSH keys for this test environment
 	sshKeys := generateSSHKeys(t, testDir)
@@ -94,18 +106,72 @@ func createTestEnvironment(t *testing.T, testDir string) *testEnvironment {
 	}
 }
 
-// findAvailablePort finds and returns an available ephemeral TCP port.
-func findAvailablePort(t *testing.T) int {
+// findAvailablePort finds and returns an available TCP port based on test name for consistency across CI/CD.
+// Uses MD5 hash of test name to generate a deterministic starting port below 40000.
+// If the calculated port is occupied, it tries port+1, port+2, etc. until finding an available one.
+// isPortAvailable checks if a port is available by testing both network binding and Docker container usage
+func isPortAvailable(t *testing.T, port int) bool {
+	// First check if we can bind to the port
+	listener, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", port))
+	if err != nil {
+		return false // Port is already in use by some process
+	}
+	listener.Close()
+
+	// Also check if Docker is using this port
+	cmd := exec.Command("docker", "ps", "--format", "{{.Ports}}")
+	output, err := cmd.Output()
+	if err != nil {
+		// If docker command fails, just rely on the network check
+		return true
+	}
+
+	// Check if any container is using this port
+	portStr := fmt.Sprintf(":%d->", port)
+	if strings.Contains(string(output), portStr) {
+		return false // Docker container is using this port
+	}
+
+	return true // Port is available
+}
+
+func findAvailablePort(t *testing.T, portType string) int {
 	t.Helper()
+
+	// Calculate deterministic port based on test name and port type
+	testName := t.Name()
+	portKey := fmt.Sprintf("%s-%s", testName, portType)
+	hash := md5.Sum([]byte(portKey))
+
+	// Convert first 4 bytes of hash to uint32, then mod to get port in range 30000-39999
+	hashValue := binary.BigEndian.Uint32(hash[:4])
+	basePort := int(hashValue%10000) + 30000
+
+	// Ensure port is below 40000
+	if basePort >= 40000 {
+		basePort = basePort - 10000
+	}
+
+	// Try to find an available port starting from the calculated base port
+	for port := basePort; port < 40000; port++ {
+		if isPortAvailable(t, port) {
+			t.Logf("Found deterministic available port: %d (base: %d, test: %s, type: %s)", port, basePort, testName, portType)
+			return port
+		}
+		// Port is occupied, try next one
+	}
+
+	// Fallback to random port if all deterministic ports are occupied
+	t.Logf("Falling back to a random port")
 	listener, err := net.Listen("tcp", "localhost:0")
 	if err != nil {
-		t.Fatalf("Failed to find an available port: %v", err)
+		t.Fatalf("Failed to find any available port: %v", err)
 	}
 	defer listener.Close()
 
 	addr := listener.Addr().(*net.TCPAddr)
 	port := addr.Port
-	t.Logf("Found available port: %d", port)
+	t.Logf("Fallback to random available port: %d (deterministic range 30000-39999 was full, test: %s, type: %s)", port, testName, portType)
 	return port
 }
 
