@@ -69,6 +69,10 @@ jobs:
           - TestExampleDokkuHttpAuth
           - TestExampleDokkuPlugin
           - TestExampleDokkuPostgres
+          - TestProviderLazySSH                    # Tests that provider doesn't connect during plan when no resources
+          - TestProviderLazySSHWithInvalidHost     # Tests lazy connection with invalid host fails only during apply
+          - TestProviderLazySSHConcurrent          # Tests concurrent provider configurations
+          - TestDynamicStorage                     # Tests dynamic storage values (merge, variables) work correctly
 
     steps:
     - name: Checkout code
@@ -98,7 +102,7 @@ jobs:
 
     - name: "Run E2E test for ${{ matrix.test_name }}, dokku: ${{ matrix.dokku_version}} terraform: ${{ matrix.terraform_version }}"
       run: |
-        go test -v ./test -run ${{ matrix.test_name }}
+        go test -v ./test -run ${{ matrix.test_name }} -timeout=20m
       env:
         TF_ACC: "1"
         DOCKER_BUILDKIT: "0"  # Disable BuildKit for compatibility

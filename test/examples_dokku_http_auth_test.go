@@ -255,33 +255,107 @@ variable "ssh_private_key" {
 		assert.Contains(t, authOutput, "test_user", "HTTP auth should have 'test_user' configured")
 	})
 
-	// test_structure.RunTestStage(t, "validate_http", func() {
-	// 	// Quick HTTP test - if main functionality works, we're good
-	// 	t.Logf("Testing HTTP functionality with credentials")
-	//
-	// 	// Test authenticated access directly (since we know auth is configured from dokku validation)
-	// 	curlCmd := exec.Command("curl", "-s", "-H", "Host: demo.dokku.test", "-u", "test_user:test_password", "http://localhost:8080")
-	// 	output, err := curlCmd.Output()
-	//
-	// 	if err == nil && strings.Contains(string(output), "Request served by") {
-	// 		t.Logf("✓ Successfully authenticated and got response from echo-server")
-	// 		assert.Contains(t, string(output), "Request served by", "HTTP response should contain 'Request served by' indicating the echo-server container is serving content")
-	// 		t.Logf("✓ HTTP validation successful! Response preview: %.200s...", string(output))
-	// 		return
-	// 	}
-	//
-	// 	// Single fallback: try from inside container
-	// 	t.Logf("External test failed, trying from inside container")
-	// 	curlInsideCmd := exec.Command("docker", "exec", containerName, "curl", "-s", "-H", "Host: demo.dokku.test", "-u", "test_user:test_password", "http://localhost")
-	// 	insideOutput, insideErr := curlInsideCmd.Output()
-	// 	if insideErr == nil && strings.Contains(string(insideOutput), "Request served by") {
-	// 		t.Logf("✓ Authentication successful from inside container")
-	// 		assert.Contains(t, string(insideOutput), "Request served by", "HTTP response should contain 'Request served by' indicating the echo-server container is serving content")
-	// 		t.Logf("✓ HTTP validation successful! Response preview: %.200s...", string(output))
-	// 	} else {
-	// 		t.Logf("Warning: Could not verify HTTP functionality, but provider deployment succeeded")
-	// 	}
-	// })
+	test_structure.RunTestStage(t, "debug_containers", func() {
+		appName := "demo"
+
+		t.Logf("=== DEBUGGING HTTP AUTH CONTAINER STATES ===")
+
+		// 1. Check Dokku container state
+		t.Logf("--- Dokku Container State ---")
+		dokkuInspectCmd := exec.Command("docker", "inspect", env.ContainerName, "--format",
+			"{{.State.Status}} | {{.NetworkSettings.Ports}} | {{.NetworkSettings.IPAddress}}")
+		dokkuInspect, err := dokkuInspectCmd.CombinedOutput()
+		if err != nil {
+			t.Logf("Dokku container inspect failed: %v", err)
+		} else {
+			t.Logf("Dokku container state: %s", string(dokkuInspect))
+		}
+
+		// 2. Check app container state
+		t.Logf("--- App Container State ---")
+		appContainerName := fmt.Sprintf("%s.web.1", appName)
+		appInspectCmd := exec.Command("docker", "inspect", appContainerName, "--format",
+			"{{.State.Status}} | {{.NetworkSettings.Ports}} | {{.NetworkSettings.IPAddress}}")
+		appInspect, err := appInspectCmd.CombinedOutput()
+		if err != nil {
+			t.Logf("App container inspect failed: %v", err)
+		} else {
+			t.Logf("App container state: %s", string(appInspect))
+		}
+
+		// 3. Test direct connection to app container
+		t.Logf("--- Direct Connection Test ---")
+		getIPCmd := exec.Command("docker", "inspect", appContainerName, "--format", "{{.NetworkSettings.IPAddress}}")
+		ipOutput, err := getIPCmd.CombinedOutput()
+		if err == nil {
+			appInternalIP := strings.TrimSpace(string(ipOutput))
+			t.Logf("App container internal IP: %s", appInternalIP)
+
+			if appInternalIP != "" {
+				directTestCmd := exec.Command("docker", "exec", env.ContainerName, "curl", "-s", "-m", "5",
+					fmt.Sprintf("http://%s:5000", appInternalIP))
+				directTest, err := directTestCmd.CombinedOutput()
+				if err != nil {
+					t.Logf("Direct container connection failed: %v", err)
+				} else {
+					response := string(directTest)
+					if len(response) > 200 {
+						response = response[:200]
+					}
+					t.Logf("Direct container connection successful: %s", response)
+				}
+			}
+		}
+
+		// 4. Test internal nginx without auth
+		t.Logf("--- Internal Nginx Test (no auth) ---")
+		internalNginxCmd := exec.Command("docker", "exec", env.ContainerName, "curl", "-s", "-m", "5",
+			"-H", "Host: demo.dokku.test", "http://localhost")
+		internalNginx, err := internalNginxCmd.CombinedOutput()
+		if err != nil {
+			t.Logf("Internal nginx test failed: %v", err)
+		} else {
+			response := string(internalNginx)
+			if len(response) > 200 {
+				response = response[:200]
+			}
+			t.Logf("Internal nginx test result: %s", response)
+		}
+
+		t.Logf("=== END HTTP AUTH DEBUGGING ===")
+	})
+
+	test_structure.RunTestStage(t, "validate_http", func() {
+		// Quick HTTP test - if main functionality works, we're good
+		t.Logf("Testing HTTP functionality with credentials")
+
+		// Get the HTTP port from environment
+		httpPort := env.ExternalPorts["http"]
+		httpURL := fmt.Sprintf("http://localhost:%s", httpPort)
+
+		// Test authenticated access directly (since we know auth is configured from dokku validation)
+		curlCmd := exec.Command("curl", "-s", "-H", "Host: demo.dokku.test", "-u", "test_user:test_password", httpURL)
+		output, err := curlCmd.Output()
+
+		if err == nil && strings.Contains(string(output), "Request served by") {
+			t.Logf("✓ Successfully authenticated and got response from echo-server")
+			assert.Contains(t, string(output), "Request served by", "HTTP response should contain 'Request served by' indicating the echo-server container is serving content")
+			t.Logf("✓ HTTP validation successful! Response preview: %.200s...", string(output))
+			return
+		}
+
+		// Single fallback: try from inside container
+		t.Logf("External test failed, trying from inside container")
+		curlInsideCmd := exec.Command("docker", "exec", env.ContainerName, "curl", "-s", "-H", "Host: demo.dokku.test", "-u", "test_user:test_password", "http://localhost")
+		insideOutput, insideErr := curlInsideCmd.Output()
+		if insideErr == nil && strings.Contains(string(insideOutput), "Request served by") {
+			t.Logf("✓ Authentication successful from inside container")
+			assert.Contains(t, string(insideOutput), "Request served by", "HTTP response should contain 'Request served by' indicating the echo-server container is serving content")
+			t.Logf("✓ HTTP validation successful! Response preview: %.200s...", string(insideOutput))
+		} else {
+			t.Logf("Warning: Could not verify HTTP functionality, but provider deployment succeeded")
+		}
+	})
 
 	test_structure.RunTestStage(t, "manual_plugin_verification", func() {
 		// Let's manually verify the plugin is working by checking commands
