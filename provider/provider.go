@@ -38,15 +38,16 @@ type dokkuProvider struct{}
 
 // dokkuProviderModel describes the provider data model.
 type dokkuProviderModel struct {
-	SshHost             types.String `tfsdk:"ssh_host"`
-	SshPort             types.Int64  `tfsdk:"ssh_port"`
-	SshUser             types.String `tfsdk:"ssh_user"`
-	SshCert             types.String `tfsdk:"ssh_cert"`
-	SshSkipHostKeyCheck types.Bool   `tfsdk:"ssh_skip_host_key_check"`
-	SshHostKey          types.String `tfsdk:"ssh_host_key"`
-	LogSshCommands      types.Bool   `tfsdk:"log_ssh_commands"`
-	UploadAppName       types.String `tfsdk:"upload_app_name"`
-	UploadSplitBytes    types.Int64  `tfsdk:"upload_split_bytes"`
+	SshHost                  types.String `tfsdk:"ssh_host"`
+	SshPort                  types.Int64  `tfsdk:"ssh_port"`
+	SshUser                  types.String `tfsdk:"ssh_user"`
+	SshCert                  types.String `tfsdk:"ssh_cert"`
+	SshSkipHostKeyCheck      types.Bool   `tfsdk:"ssh_skip_host_key_check"`
+	SshHostKey               types.String `tfsdk:"ssh_host_key"`
+	LogSshCommands           types.Bool   `tfsdk:"log_ssh_commands"`
+	UploadAppName            types.String `tfsdk:"upload_app_name"`
+	UploadSplitBytes         types.Int64  `tfsdk:"upload_split_bytes"`
+	SkipUnreachableOnDestroy types.Bool   `tfsdk:"skip_unreachable_on_destroy"`
 }
 
 func (p *dokkuProvider) Metadata(ctx context.Context, req provider.MetadataRequest, resp *provider.MetadataResponse) {
@@ -144,6 +145,15 @@ func (p *dokkuProvider) Schema(ctx context.Context, req provider.SchemaRequest, 
 					int64validator.AtLeast(1),
 				},
 			},
+			"skip_unreachable_on_destroy": schema.BoolAttribute{
+				Optional: true,
+				Description: strings.Join([]string{
+					"If true, skip SSH connection failures during destroy operations and remove resources from state anyway.",
+					"Useful when infrastructure has already been destroyed outside of Terraform (e.g., VM deleted, network unreachable).",
+					"Only affects destroy operations - create/update/read will still fail on connection errors.",
+					"Default: false",
+				}, "\n  "),
+			},
 		},
 	}
 }
@@ -203,6 +213,7 @@ func (p *dokkuProvider) Configure(ctx context.Context, req provider.ConfigureReq
 	logSshCommands := false
 	uploadAppName := "storage-sync"
 	uploadSplitBytes := 256
+	skipUnreachableOnDestroy := false
 
 	if !config.SshHost.IsNull() {
 		host = config.SshHost.ValueString()
@@ -229,6 +240,9 @@ func (p *dokkuProvider) Configure(ctx context.Context, req provider.ConfigureReq
 	}
 	if !config.UploadSplitBytes.IsNull() {
 		uploadSplitBytes = int(config.UploadSplitBytes.ValueInt64())
+	}
+	if !config.SkipUnreachableOnDestroy.IsNull() {
+		skipUnreachableOnDestroy = config.SkipUnreachableOnDestroy.ValueBool()
 	}
 
 	usr, err := user.Current()
@@ -276,15 +290,16 @@ func (p *dokkuProvider) Configure(ctx context.Context, req provider.ConfigureReq
 
 	// Create DokkuConfig for lazy connection establishment
 	dokkuConfig := &configpkg.DokkuConfig{
-		Host:             host,
-		Port:             port,
-		User:             sshUsername,
-		CertPath:         sshCertPath,
-		SkipHostKeyCheck: skipHostKeyCheck,
-		HostKey:          hostKey,
-		LogSshCommands:   logSshCommands,
-		UploadAppName:    uploadAppName,
-		UploadSplitBytes: uploadSplitBytes,
+		Host:                     host,
+		Port:                     port,
+		User:                     sshUsername,
+		CertPath:                 sshCertPath,
+		SkipHostKeyCheck:         skipHostKeyCheck,
+		HostKey:                  hostKey,
+		LogSshCommands:           logSshCommands,
+		UploadAppName:            uploadAppName,
+		UploadSplitBytes:         uploadSplitBytes,
+		SkipUnreachableOnDestroy: skipUnreachableOnDestroy,
 	}
 
 	tflog.Debug(ctx, "Provider configured for lazy SSH connections")

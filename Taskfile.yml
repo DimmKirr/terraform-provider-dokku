@@ -1,0 +1,49 @@
+version: '3'
+
+includes:
+  claude:
+    taskfile: ~/dev/Taskfile.yml
+    flatten: true
+
+vars:
+  VERSION: 1.2.1
+  BIN_DIR: bin
+  BINARY_NAME: terraform-provider-dokku_v{{.VERSION}}
+  # We dont' destroy resources in tests for now
+  SKIP_DESTROY: true
+  TEST_TIMEOUT: 20m
+  GOOS:
+    sh: go env GOOS
+  GOARCH:
+    sh: go env GOARCH
+
+env:
+  ASDF_GOLANG_MOD_VERSION_ENABLED: true
+  SKIP_DESTROY: "{{.SKIP_DESTROY}}"
+
+tasks:
+  build:
+    desc: Build the provider binary
+    vars:
+      BINARY: terraform-provider-dokku_v{{.VERSION}}
+      BIN_PLATFORM_DIR: bin/{{.GOOS}}_{{.GOARCH}}
+    cmds:
+      - mkdir -p {{.BIN_PLATFORM_DIR}}
+      - CGO_ENABLED=0 go build -o {{.BIN_PLATFORM_DIR}}/{{.BINARY}} .
+
+  install:
+    desc: Install the provider locally
+    deps: [build]
+    vars:
+      BINARY: terraform-provider-dokku_v{{.VERSION}}
+      BIN_PLATFORM_DIR: bin/{{.GOOS}}_{{.GOARCH}}
+      PLUGIN_DIR: ~/.terraform.d/plugins/registry.terraform.io/DimmKirr/dokku/{{.VERSION}}
+    cmds:
+      - mkdir -p {{.PLUGIN_DIR}}/{{.GOOS}}_{{.GOARCH}}
+      - cp {{.BIN_PLATFORM_DIR}}/{{.BINARY}} {{.PLUGIN_DIR}}/{{.GOOS}}_{{.GOARCH}}/{{.BINARY}}
+      - |
+        if [ "{{.GOOS}}" = "darwin" ]; then
+          echo "Signing binary on macOS..."
+          codesign -s - -f {{.PLUGIN_DIR}}/{{.GOOS}}_{{.GOARCH}}/{{.BINARY}} 2>/dev/null || true
+          echo "Binary signed successfully"
+        fi

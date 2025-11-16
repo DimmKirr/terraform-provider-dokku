@@ -22,6 +22,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-framework/types/basetypes"
+	"github.com/hashicorp/terraform-plugin-log/tflog"
 )
 
 var (
@@ -39,6 +40,13 @@ var storageObjectType = types.ObjectType{
 	},
 }
 
+// dockerOptionObjectType defines the object type for docker_options map elements
+var dockerOptionObjectType = types.ObjectType{
+	AttrTypes: map[string]attr.Type{
+		"phase": types.SetType{ElemType: types.StringType},
+	},
+}
+
 func NewAppResource() resource.Resource {
 	return &appResource{}
 }
@@ -48,16 +56,16 @@ type appResource struct {
 }
 
 type appResourceModel struct {
-	AppName       types.String                 `tfsdk:"app_name"`
-	Config        types.Map                    `tfsdk:"config"`
-	Storage       types.Map                    `tfsdk:"storage"`
-	Checks        *checkModel                  `tfsdk:"checks"`
-	Ports         map[string]portModel         `tfsdk:"ports"`
-	ProxyPorts    map[string]portModel         `tfsdk:"proxy_ports"`
-	Domains       types.Set                    `tfsdk:"domains"`
-	DockerOptions map[string]dockerOptionModel `tfsdk:"docker_options"`
-	Networks      *networkModel                `tfsdk:"networks"`
-	Deploy        *deployModel                 `tfsdk:"deploy"`
+	AppName       types.String         `tfsdk:"app_name"`
+	Config        types.Map            `tfsdk:"config"`
+	Storage       types.Map            `tfsdk:"storage"`
+	Checks        *checkModel          `tfsdk:"checks"`
+	Ports         map[string]portModel `tfsdk:"ports"`
+	ProxyPorts    map[string]portModel `tfsdk:"proxy_ports"`
+	Domains       types.Set            `tfsdk:"domains"`
+	DockerOptions types.Map            `tfsdk:"docker_options"`
+	Networks      *networkModel        `tfsdk:"networks"`
+	Deploy        *deployModel         `tfsdk:"deploy"`
 }
 
 type storageModel struct {
@@ -408,6 +416,15 @@ func (r *appResource) Read(ctx context.Context, req resource.ReadRequest, resp *
 	// Create SSH connection on-demand
 	client, err := r.config.NewClient(ctx)
 	if err != nil {
+		if r.config.SkipUnreachableOnDestroy {
+			tflog.Warn(ctx, "SSH connection failed during read, but skip_unreachable_on_destroy is enabled. Removing resource from state.", map[string]any{
+				"resource": "dokku_app",
+				"app_name": state.AppName.ValueString(),
+				"error":    err.Error(),
+			})
+			resp.State.RemoveResource(ctx)
+			return
+		}
 		resp.Diagnostics.AddError("SSH connection failed", err.Error())
 		return
 	}
@@ -683,21 +700,33 @@ func (r *appResource) Create(ctx context.Context, req resource.CreateRequest, re
 	if !plan.Storage.IsNull() && !plan.Storage.IsUnknown() {
 		storageElements := plan.Storage.Elements()
 		for hostPath, elem := range storageElements {
-			var storage storageModel
-			diags := elem.(basetypes.ObjectValue).As(ctx, &storage, basetypes.ObjectAsOptions{})
-			if diags.HasError() {
-				resp.Diagnostics.Append(diags...)
-				continue
-			}
+			if objVal, ok := elem.(basetypes.ObjectValue); ok {
+				attrs := objVal.Attributes()
 
-			err := client.StorageEnsure(ctx, hostPath, storage.LocalDirectory.ValueStringPointer())
-			if err != nil {
-				resp.Diagnostics.AddAttributeError(path.Root("storage").AtMapKey(hostPath), "Unable to ensure storage", "Unable to ensure storage. "+err.Error())
-			}
+				var localDirectoryPtr *string
+				if localDirAttr, exists := attrs["local_directory"]; exists {
+					if localDirStr, ok := localDirAttr.(basetypes.StringValue); ok && !localDirStr.IsNull() {
+						val := localDirStr.ValueString()
+						localDirectoryPtr = &val
+					}
+				}
 
-			err = client.StorageMount(ctx, plan.AppName.ValueString(), hostPath, storage.MountPath.ValueString())
-			if err != nil {
-				resp.Diagnostics.AddAttributeError(path.Root("storage").AtMapKey(hostPath), "Unable to mount storage", "Unable to mount storage. "+err.Error())
+				var mountPath string
+				if mountPathAttr, exists := attrs["mount_path"]; exists {
+					if mountPathStr, ok := mountPathAttr.(basetypes.StringValue); ok {
+						mountPath = mountPathStr.ValueString()
+					}
+				}
+
+				err := client.StorageEnsure(ctx, hostPath, localDirectoryPtr)
+				if err != nil {
+					resp.Diagnostics.AddAttributeError(path.Root("storage").AtMapKey(hostPath), "Unable to ensure storage", "Unable to ensure storage. "+err.Error())
+				}
+
+				err = client.StorageMount(ctx, plan.AppName.ValueString(), hostPath, mountPath)
+				if err != nil {
+					resp.Diagnostics.AddAttributeError(path.Root("storage").AtMapKey(hostPath), "Unable to mount storage", "Unable to mount storage. "+err.Error())
+				}
 			}
 		}
 	}
@@ -769,10 +798,20 @@ func (r *appResource) Create(ctx context.Context, req resource.CreateRequest, re
 		}
 	}
 
-	for option, dockerOption := range plan.DockerOptions {
-		err := client.DockerOptionAdd(ctx, plan.AppName.ValueString(), formatDockerOptionsPhases(dockerOption.Phase), option)
-		if err != nil {
-			resp.Diagnostics.AddAttributeError(path.Root("docker_options").AtMapKey(option), "Unable to add docker option", "Unable to add docker option. "+err.Error())
+	if !plan.DockerOptions.IsNull() && !plan.DockerOptions.IsUnknown() {
+		dockerOptionsElements := plan.DockerOptions.Elements()
+		for option, dockerOptionValue := range dockerOptionsElements {
+			if objVal, ok := dockerOptionValue.(basetypes.ObjectValue); ok {
+				attrs := objVal.Attributes()
+				if phaseAttr, exists := attrs["phase"]; exists {
+					if phaseSet, ok := phaseAttr.(basetypes.SetValue); ok {
+						err := client.DockerOptionAdd(ctx, plan.AppName.ValueString(), formatDockerOptionsPhases(phaseSet), option)
+						if err != nil {
+							resp.Diagnostics.AddAttributeError(path.Root("docker_options").AtMapKey(option), "Unable to add docker option", "Unable to add docker option. "+err.Error())
+						}
+					}
+				}
+			}
 		}
 	}
 
@@ -931,77 +970,98 @@ func (r *appResource) Update(ctx context.Context, req resource.UpdateRequest, re
 	for existingName, existingElem := range stateStorageElements {
 		_, found := planStorageElements[existingName]
 		if !found {
-			var existingStorage storageModel
-			diags := existingElem.(basetypes.ObjectValue).As(ctx, &existingStorage, basetypes.ObjectAsOptions{})
-			if diags.HasError() {
-				resp.Diagnostics.Append(diags...)
-				continue
-			}
+			if objVal, ok := existingElem.(basetypes.ObjectValue); ok {
+				attrs := objVal.Attributes()
 
-			err := client.StorageUnmount(ctx, appName, existingName, existingStorage.MountPath.ValueString())
-			if err != nil {
-				resp.Diagnostics.AddAttributeError(path.Root("storage").AtMapKey(existingName), "Unable to unmount storage", "Unable to unmount storage. "+err.Error())
+				var mountPath string
+				if mountPathAttr, exists := attrs["mount_path"]; exists {
+					if mountPathStr, ok := mountPathAttr.(basetypes.StringValue); ok {
+						mountPath = mountPathStr.ValueString()
+					}
+				}
+
+				err := client.StorageUnmount(ctx, appName, existingName, mountPath)
+				if err != nil {
+					resp.Diagnostics.AddAttributeError(path.Root("storage").AtMapKey(existingName), "Unable to unmount storage", "Unable to unmount storage. "+err.Error())
+				}
+				restartRequired = true
 			}
-			restartRequired = true
 		}
 	}
 
 	// Handle updates and additions
 	for planName, planElem := range planStorageElements {
-		var planStorage storageModel
-		diags := planElem.(basetypes.ObjectValue).As(ctx, &planStorage, basetypes.ObjectAsOptions{})
-		if diags.HasError() {
-			resp.Diagnostics.Append(diags...)
-			continue
-		}
+		if planObjVal, ok := planElem.(basetypes.ObjectValue); ok {
+			planAttrs := planObjVal.Attributes()
 
-		if existingElem, exists := stateStorageElements[planName]; exists {
-			// Update existing storage
-			var existingStorage storageModel
-			diags := existingElem.(basetypes.ObjectValue).As(ctx, &existingStorage, basetypes.ObjectAsOptions{})
-			if diags.HasError() {
-				resp.Diagnostics.Append(diags...)
-				continue
+			var planLocalDirectoryPtr *string
+			if localDirAttr, exists := planAttrs["local_directory"]; exists {
+				if localDirStr, ok := localDirAttr.(basetypes.StringValue); ok && !localDirStr.IsNull() {
+					val := localDirStr.ValueString()
+					planLocalDirectoryPtr = &val
+				}
 			}
 
-			if !existingStorage.MountPath.Equal(planStorage.MountPath) {
-				err := client.StorageUnmount(ctx, appName, planName, existingStorage.MountPath.ValueString())
-				if err != nil {
-					resp.Diagnostics.AddAttributeError(path.Root("storage").AtMapKey(planName), "Unable to unmount storage", "Unable to unmount storage. "+err.Error())
+			var planMountPath string
+			if mountPathAttr, exists := planAttrs["mount_path"]; exists {
+				if mountPathStr, ok := mountPathAttr.(basetypes.StringValue); ok {
+					planMountPath = mountPathStr.ValueString()
 				}
+			}
 
-				err = client.StorageEnsure(ctx, planName, planStorage.LocalDirectory.ValueStringPointer())
+			if existingElem, exists := stateStorageElements[planName]; exists {
+				// Update existing storage
+				if existingObjVal, ok := existingElem.(basetypes.ObjectValue); ok {
+					existingAttrs := existingObjVal.Attributes()
+
+					var existingMountPath string
+					if mountPathAttr, exists := existingAttrs["mount_path"]; exists {
+						if mountPathStr, ok := mountPathAttr.(basetypes.StringValue); ok {
+							existingMountPath = mountPathStr.ValueString()
+						}
+					}
+
+					// Check if mount path changed
+					if existingMountPath != planMountPath {
+						err := client.StorageUnmount(ctx, appName, planName, existingMountPath)
+						if err != nil {
+							resp.Diagnostics.AddAttributeError(path.Root("storage").AtMapKey(planName), "Unable to unmount storage", "Unable to unmount storage. "+err.Error())
+						}
+
+						err = client.StorageEnsure(ctx, planName, planLocalDirectoryPtr)
+						if err != nil {
+							resp.Diagnostics.AddAttributeError(path.Root("storage").AtMapKey(planName), "Unable to ensure storage", "Unable to ensure storage. "+err.Error())
+						}
+
+						err = client.StorageMount(ctx, appName, planName, planMountPath)
+						if err != nil {
+							resp.Diagnostics.AddAttributeError(path.Root("storage").AtMapKey(planName), "Unable to mount storage", "Unable to mount storage. "+err.Error())
+						}
+
+						restartRequired = true
+					} else if planLocalDirectoryPtr != nil {
+						err := client.StorageEnsure(ctx, planName, planLocalDirectoryPtr)
+						if err != nil {
+							resp.Diagnostics.AddAttributeError(path.Root("storage").AtMapKey(planName), "Unable to ensure storage", "Unable to ensure storage. "+err.Error())
+						}
+
+						restartRequired = true
+					}
+				}
+			} else {
+				// Add new storage
+				err := client.StorageEnsure(ctx, planName, planLocalDirectoryPtr)
 				if err != nil {
 					resp.Diagnostics.AddAttributeError(path.Root("storage").AtMapKey(planName), "Unable to ensure storage", "Unable to ensure storage. "+err.Error())
 				}
 
-				err = client.StorageMount(ctx, appName, planName, planStorage.MountPath.ValueString())
+				err = client.StorageMount(ctx, appName, planName, planMountPath)
 				if err != nil {
 					resp.Diagnostics.AddAttributeError(path.Root("storage").AtMapKey(planName), "Unable to mount storage", "Unable to mount storage. "+err.Error())
 				}
 
 				restartRequired = true
-			} else if !planStorage.LocalDirectory.IsNull() {
-				err := client.StorageEnsure(ctx, planName, planStorage.LocalDirectory.ValueStringPointer())
-				if err != nil {
-					resp.Diagnostics.AddAttributeError(path.Root("storage").AtMapKey(planName), "Unable to ensure storage", "Unable to ensure storage. "+err.Error())
-				}
-
-				restartRequired = true
 			}
-		} else {
-			// Add new storage
-			err := client.StorageEnsure(ctx, planName, planStorage.LocalDirectory.ValueStringPointer())
-			if err != nil {
-				resp.Diagnostics.AddAttributeError(path.Root("storage").AtMapKey(planName), "Unable to ensure storage", "Unable to ensure storage. "+err.Error())
-			}
-
-			err = client.StorageMount(ctx, appName, planName, planStorage.MountPath.ValueString())
-			if err != nil {
-				resp.Diagnostics.AddAttributeError(path.Root("storage").AtMapKey(planName), "Unable to mount storage", "Unable to mount storage. "+err.Error())
-			}
-
-			restartRequired = true
 		}
 	}
 	// --
@@ -1194,21 +1254,57 @@ func (r *appResource) Update(ctx context.Context, req resource.UpdateRequest, re
 	// --
 
 	// -- docker options
-	for existingValue, existingDockerOption := range state.DockerOptions {
+	var stateDockerOptionsElements map[string]attr.Value
+	if !state.DockerOptions.IsNull() && !state.DockerOptions.IsUnknown() {
+		stateDockerOptionsElements = state.DockerOptions.Elements()
+	} else {
+		stateDockerOptionsElements = make(map[string]attr.Value)
+	}
+
+	var planDockerOptionsElements map[string]attr.Value
+	if !plan.DockerOptions.IsNull() && !plan.DockerOptions.IsUnknown() {
+		planDockerOptionsElements = plan.DockerOptions.Elements()
+	} else {
+		planDockerOptionsElements = make(map[string]attr.Value)
+	}
+
+	for existingValue, existingDockerOptionValue := range stateDockerOptionsElements {
 		found := false
-		for planValue, planDockerOption := range plan.DockerOptions {
+		for planValue, planDockerOptionValue := range planDockerOptionsElements {
 			if existingValue == planValue {
 				found = true
 
-				if !existingDockerOption.Phase.Equal(planDockerOption.Phase) {
-					err := client.DockerOptionRemove(ctx, appName, formatDockerOptionsPhases(existingDockerOption.Phase), existingValue)
+				// Extract phase from existing docker option
+				var existingPhase basetypes.SetValue
+				if existingObj, ok := existingDockerOptionValue.(basetypes.ObjectValue); ok {
+					attrs := existingObj.Attributes()
+					if phaseAttr, exists := attrs["phase"]; exists {
+						if phaseSet, ok := phaseAttr.(basetypes.SetValue); ok {
+							existingPhase = phaseSet
+						}
+					}
+				}
+
+				// Extract phase from plan docker option
+				var planPhase basetypes.SetValue
+				if planObj, ok := planDockerOptionValue.(basetypes.ObjectValue); ok {
+					attrs := planObj.Attributes()
+					if phaseAttr, exists := attrs["phase"]; exists {
+						if phaseSet, ok := phaseAttr.(basetypes.SetValue); ok {
+							planPhase = phaseSet
+						}
+					}
+				}
+
+				if !existingPhase.Equal(planPhase) {
+					err := client.DockerOptionRemove(ctx, appName, formatDockerOptionsPhases(existingPhase), existingValue)
 					if err != nil {
-						resp.Diagnostics.AddAttributeError(path.Root("storage").AtMapKey(existingValue), "Unable to remove docker option", "Unable to remove docker option. "+err.Error())
+						resp.Diagnostics.AddAttributeError(path.Root("docker_options").AtMapKey(existingValue), "Unable to remove docker option", "Unable to remove docker option. "+err.Error())
 					}
 
-					err = client.DockerOptionAdd(ctx, appName, formatDockerOptionsPhases(planDockerOption.Phase), planValue)
+					err = client.DockerOptionAdd(ctx, appName, formatDockerOptionsPhases(planPhase), planValue)
 					if err != nil {
-						resp.Diagnostics.AddAttributeError(path.Root("storage").AtMapKey(existingValue), "Unable to add docker option", "Unable to add docker option. "+err.Error())
+						resp.Diagnostics.AddAttributeError(path.Root("docker_options").AtMapKey(existingValue), "Unable to add docker option", "Unable to add docker option. "+err.Error())
 					}
 
 					restartRequired = true
@@ -1218,29 +1314,45 @@ func (r *appResource) Update(ctx context.Context, req resource.UpdateRequest, re
 			}
 		}
 		if !found {
-			err := client.DockerOptionRemove(ctx, appName, formatDockerOptionsPhases(existingDockerOption.Phase), existingValue)
-			if err != nil {
-				resp.Diagnostics.AddAttributeError(path.Root("docker_options").AtMapKey(existingValue), "Unable to remove docker option", "Unable to remove docker option. "+err.Error())
-			}
+			// Extract phase from existing docker option for removal
+			if existingObj, ok := existingDockerOptionValue.(basetypes.ObjectValue); ok {
+				attrs := existingObj.Attributes()
+				if phaseAttr, exists := attrs["phase"]; exists {
+					if phaseSet, ok := phaseAttr.(basetypes.SetValue); ok {
+						err := client.DockerOptionRemove(ctx, appName, formatDockerOptionsPhases(phaseSet), existingValue)
+						if err != nil {
+							resp.Diagnostics.AddAttributeError(path.Root("docker_options").AtMapKey(existingValue), "Unable to remove docker option", "Unable to remove docker option. "+err.Error())
+						}
 
-			restartRequired = true
+						restartRequired = true
+					}
+				}
+			}
 		}
 	}
-	for planValue, planDockerOption := range plan.DockerOptions {
+	for planValue, planDockerOptionValue := range planDockerOptionsElements {
 		found := false
-		for existingValue := range state.DockerOptions {
+		for existingValue := range stateDockerOptionsElements {
 			if existingValue == planValue {
 				found = true
 				break
 			}
 		}
 		if !found {
-			err := client.DockerOptionAdd(ctx, appName, formatDockerOptionsPhases(planDockerOption.Phase), planValue)
-			if err != nil {
-				resp.Diagnostics.AddAttributeError(path.Root("docker_options").AtMapKey(planValue), "Unable to add docker option", "Unable to add docker option. "+err.Error())
-			}
+			// Extract phase from plan docker option for addition
+			if planObj, ok := planDockerOptionValue.(basetypes.ObjectValue); ok {
+				attrs := planObj.Attributes()
+				if phaseAttr, exists := attrs["phase"]; exists {
+					if phaseSet, ok := phaseAttr.(basetypes.SetValue); ok {
+						err := client.DockerOptionAdd(ctx, appName, formatDockerOptionsPhases(phaseSet), planValue)
+						if err != nil {
+							resp.Diagnostics.AddAttributeError(path.Root("docker_options").AtMapKey(planValue), "Unable to add docker option", "Unable to add docker option. "+err.Error())
+						}
 
-			restartRequired = true
+						restartRequired = true
+					}
+				}
+			}
 		}
 	}
 	// --
@@ -1352,6 +1464,15 @@ func (r *appResource) Delete(ctx context.Context, req resource.DeleteRequest, re
 	// Create SSH connection on-demand
 	client, err := r.config.NewClient(ctx)
 	if err != nil {
+		if r.config.SkipUnreachableOnDestroy {
+			tflog.Warn(ctx, "SSH connection failed during destroy, but skip_unreachable_on_destroy is enabled. Removing resource from state without remote deletion.", map[string]any{
+				"resource": "dokku_app",
+				"app_name": state.AppName.ValueString(),
+				"error":    err.Error(),
+			})
+			// Remove from state even though we couldn't connect
+			return
+		}
 		resp.Diagnostics.AddError("SSH connection failed", err.Error())
 		return
 	}

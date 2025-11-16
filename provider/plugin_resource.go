@@ -13,6 +13,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+	"github.com/hashicorp/terraform-plugin-log/tflog"
 )
 
 var (
@@ -104,6 +105,14 @@ func (r *pluginResource) Read(ctx context.Context, req resource.ReadRequest, res
 	// Create SSH connection on-demand
 	client, err := r.config.NewClient(ctx)
 	if err != nil {
+		if r.config.SkipUnreachableOnDestroy {
+			tflog.Warn(ctx, "SSH connection failed during read, but skip_unreachable_on_destroy is enabled. Removing resource from state.", map[string]any{
+				"resource": "dokku_plugin",
+				"error":    err.Error(),
+			})
+			resp.State.RemoveResource(ctx)
+			return
+		}
 		resp.Diagnostics.AddError("SSH connection failed", err.Error())
 		return
 	}

@@ -15,15 +15,16 @@ import (
 
 // DokkuConfig holds SSH configuration for lazy connection creation
 type DokkuConfig struct {
-	Host             string
-	Port             uint
-	User             string
-	CertPath         string
-	SkipHostKeyCheck bool
-	HostKey          string
-	LogSshCommands   bool
-	UploadAppName    string
-	UploadSplitBytes int
+	Host                     string
+	Port                     uint
+	User                     string
+	CertPath                 string
+	SkipHostKeyCheck         bool
+	HostKey                  string
+	LogSshCommands           bool
+	UploadAppName            string
+	UploadSplitBytes         int
+	SkipUnreachableOnDestroy bool
 }
 
 // NewClient creates a new dokkuClient with SSH connection on-demand

@@ -16,6 +16,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-framework/types/basetypes"
+	"github.com/hashicorp/terraform-plugin-log/tflog"
 )
 
 var (
@@ -110,6 +111,14 @@ func (r *redisResource) Read(ctx context.Context, req resource.ReadRequest, resp
 	// Create SSH connection on-demand
 	client, err := r.config.NewClient(ctx)
 	if err != nil {
+		if r.config.SkipUnreachableOnDestroy {
+			tflog.Warn(ctx, "SSH connection failed during read, but skip_unreachable_on_destroy is enabled. Removing resource from state.", map[string]any{
+				"resource": "dokku_redis",
+				"error":    err.Error(),
+			})
+			resp.State.RemoveResource(ctx)
+			return
+		}
 		resp.Diagnostics.AddError("SSH connection failed", err.Error())
 		return
 	}
@@ -292,6 +301,14 @@ func (r *redisResource) Delete(ctx context.Context, req resource.DeleteRequest, 
 	// Create SSH connection on-demand
 	client, err := r.config.NewClient(ctx)
 	if err != nil {
+		if r.config.SkipUnreachableOnDestroy {
+			tflog.Warn(ctx, "SSH connection failed during destroy, but skip_unreachable_on_destroy is enabled. Removing resource from state without remote deletion.", map[string]any{
+				"resource": "dokku_redis",
+				"service":  state.ServiceName.ValueString(),
+				"error":    err.Error(),
+			})
+			return
+		}
 		resp.Diagnostics.AddError("SSH connection failed", err.Error())
 		return
 	}
