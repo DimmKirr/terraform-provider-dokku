@@ -1,9 +1,9 @@
 # Terraform Provider for Dokku (Terraform Plugin Framework)
 
-[![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/aliksend/terraform-provider-dokku/release.yml)](https://github.com/aliksend/terraform-provider-dokku/actions/workflows/release.yml)
-[![GitHub Release Date](https://img.shields.io/github/release-date/aliksend/terraform-provider-dokku?label=released)](https://registry.terraform.io/providers/aliksend/dokku/latest)
-[![Terraform Registry](https://img.shields.io/badge/Terraform%20Registry-gray)](https://registry.terraform.io/providers/aliksend/dokku/latest)
-[![Static Badge](https://img.shields.io/badge/Documentation-blue)](https://registry.terraform.io/providers/aliksend/dokku/latest/docs)
+[![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/DimmKirr/terraform-provider-dokku/release.yml)](https://github.com/DimmKirr/terraform-provider-dokku/actions/workflows/release.yml)
+[![GitHub Release Date](https://img.shields.io/github/release-date/DimmKirr/terraform-provider-dokku?label=released)](https://registry.terraform.io/providers/DimmKirr/dokku/latest)
+[![Terraform Registry](https://img.shields.io/badge/Terraform%20Registry-gray)](https://registry.terraform.io/providers/DimmKirr/dokku/latest)
+[![Static Badge](https://img.shields.io/badge/Documentation-blue)](https://registry.terraform.io/providers/DimmKirr/dokku/latest/docs)
 
 This repository is a [Terraform](https://www.terraform.io) provider for [Dokku](https://dokku.com/).
 
@@ -34,7 +34,7 @@ The SSH key must belong to [dokku user](https://dokku.com/docs/deployment/user-m
 terraform {
   required_providers {
     dokku = {
-      source  = "registry.terraform.io/aliksend/dokku"
+      source  = "registry.terraform.io/DimmKirr/dokku"
     }
   }
 }
@@ -116,7 +116,7 @@ You need to have gitlab variable SSH_PRIVATE_KEY with private key, added in [ste
   terraform {
     required_providers {
       dokku = {
-        source = "registry.terraform.io/aliksend/dokku"
+        source = "registry.terraform.io/DimmKirr/dokku"
       }
     }
 
@@ -204,7 +204,7 @@ As long as built-in gitlab [built-in env var](https://docs.gitlab.com/ee/ci/vari
   terraform {
     required_providers {
       dokku = {
-        source = "registry.terraform.io/aliksend/dokku"
+        source = "registry.terraform.io/DimmKirr/dokku"
       }
     }
 
@@ -319,7 +319,7 @@ You need to have gitlab variable SSH_PRIVATE_KEY with private key, added in [ste
   terraform {
     required_providers {
       dokku = {
-        source = "registry.terraform.io/aliksend/dokku"
+        source = "registry.terraform.io/DimmKirr/dokku"
       }
     }
 
@@ -366,3 +366,7 @@ To generate or update documentation, run `go generate ./...`.
 ```shell
 go install .
 ```
+
+---
+
+Initially forked from [aliksend/terraform-provider-dokku](https://github.com/aliksend/terraform-provider-dokku/) but since then substantially refactored to support modern provider approach.

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"net"
 
-	dokkuclient "github.com/aliksend/terraform-provider-dokku/provider/dokku_client"
+	dokkuclient "github.com/DimmKirr/terraform-provider-dokku/provider/dokku_client"
 
 	"github.com/blang/semver"
 	"github.com/hashicorp/terraform-plugin-log/tflog"
@@ -29,6 +29,11 @@ type DokkuConfig struct {
 
 // NewClient creates a new dokkuClient with SSH connection on-demand
 func (c *DokkuConfig) NewClient(ctx context.Context) (*dokkuclient.Client, error) {
+	// Validate that required connection details are available
+	if c.Host == "" {
+		return nil, fmt.Errorf("ssh_host is not set. This typically happens when ssh_host uses a computed value (e.g., module.vm.ip_address). Either: (1) use depends_on to ensure dependencies are created first, (2) use 'terraform apply -target' to create dependencies first, or (3) set ssh_host to a known value")
+	}
+
 	tflog.Debug(ctx, "Creating SSH connection", map[string]any{"host": c.Host, "port": c.Port, "user": c.User})
 
 	// Get SSH authentication

@@ -10,8 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	configpkg "github.com/aliksend/terraform-provider-dokku/internal/config"
-	"github.com/aliksend/terraform-provider-dokku/provider/services"
+	configpkg "github.com/DimmKirr/terraform-provider-dokku/internal/config"
+	"github.com/DimmKirr/terraform-provider-dokku/provider/services"
 	"github.com/hashicorp/terraform-plugin-framework-validators/int64validator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
@@ -167,41 +167,8 @@ func (p *dokkuProvider) Configure(ctx context.Context, req provider.ConfigureReq
 		return
 	}
 
-	// If practitioner provided a configuration value for any of the
-	// attributes, it must be a known value.
-
-	if config.SshHost.IsUnknown() {
-		resp.Diagnostics.AddAttributeError(
-			path.Root("ssh_host"),
-			"Unknown SSH host",
-			"Unknown SSH host",
-		)
-	}
-	if config.SshPort.IsUnknown() {
-		resp.Diagnostics.AddAttributeError(
-			path.Root("ssh_port"),
-			"Unknown SSH port",
-			"Unknown SSH port",
-		)
-	}
-	if config.SshUser.IsUnknown() {
-		resp.Diagnostics.AddAttributeError(
-			path.Root("ssh_user"),
-			"Unknown SSH user",
-			"Unknown SSH user",
-		)
-	}
-	if config.SshCert.IsUnknown() {
-		resp.Diagnostics.AddAttributeError(
-			path.Root("ssh_cert"),
-			"Unknown SSH cert",
-			"Unknown SSH cert",
-		)
-	}
-
-	if resp.Diagnostics.HasError() {
-		return
-	}
+	// Allow unknown values during configuration - validation will happen
+	// when resources actually try to establish connections (lazy connection)
 
 	// Default values to environment variables, but override
 	// with Terraform configuration value if set.
@@ -215,16 +182,26 @@ func (p *dokkuProvider) Configure(ctx context.Context, req provider.ConfigureReq
 	uploadSplitBytes := 256
 	skipUnreachableOnDestroy := false
 
-	if !config.SshHost.IsNull() {
+	if config.SshHost.IsUnknown() {
+		tflog.Debug(ctx, "SSH host is unknown (will be known after apply) - deferring validation to resource operations")
+	} else if !config.SshHost.IsNull() {
 		host = config.SshHost.ValueString()
 	}
-	if !config.SshPort.IsNull() {
+	if config.SshPort.IsUnknown() {
+		tflog.Debug(ctx, "SSH port is unknown (will be known after apply)")
+	} else if !config.SshPort.IsNull() {
 		port = uint(config.SshPort.ValueInt64())
 	}
-	if !config.SshUser.IsNull() {
+
+	if config.SshUser.IsUnknown() {
+		tflog.Debug(ctx, "SSH user is unknown (will be known after apply)")
+	} else if !config.SshUser.IsNull() {
 		sshUsername = config.SshUser.ValueString()
 	}
-	if !config.SshCert.IsNull() {
+
+	if config.SshCert.IsUnknown() {
+		tflog.Debug(ctx, "SSH cert is unknown (will be known after apply)")
+	} else if !config.SshCert.IsNull() {
 		var err error
 		sshCertPath, err = getCertFilename(ctx, config.SshCert.ValueString())
 		if err != nil {
@@ -253,29 +230,17 @@ func (p *dokkuProvider) Configure(ctx context.Context, req provider.ConfigureReq
 	sshCertPath, err = resolveHomeDir(sshCertPath)
 	if err != nil {
 		resp.Diagnostics.AddAttributeError(path.Root("ssh_cert"), "Unable to get SSH cert", "Unable to get SSH cert. "+err.Error())
-	}
-
-	// If any of the expected configurations are missing, return
-	// errors with provider-specific guidance.
-
-	if host == "" {
-		resp.Diagnostics.AddAttributeError(path.Root("ssh_host"), "Missing SSH host", "Missing SSH host")
-	}
-	if port == 0 {
-		resp.Diagnostics.AddAttributeError(path.Root("ssh_port"), "Missing SSH port", "Missing SSH port")
-	}
-	if sshUsername == "" {
-		resp.Diagnostics.AddAttributeError(path.Root("ssh_user"), "Missing SSH user", "Missing SSH user")
-	}
-	if sshCertPath == "" {
-		resp.Diagnostics.AddAttributeError(path.Root("ssh_cert"), "Missing SSH cert", "Missing SSH cert")
-	}
-
-	if resp.Diagnostics.HasError() {
 		return
 	}
 
-	tflog.Debug(ctx, "Provider configuration", map[string]any{"host": host, "port": port, "user": sshUsername})
+	// Don't validate empty/missing values here - they may be computed (unknown during plan)
+	// Validation will happen when resources try to establish connections via NewClient()
+
+	if host == "" {
+		tflog.Debug(ctx, "Provider configured with empty/unknown SSH connection details - will be validated when resources attempt to connect")
+	} else {
+		tflog.Debug(ctx, "Provider configured for SSH connections", map[string]any{"host": host, "port": port, "user": sshUsername})
+	}
 
 	// Parse host key configuration
 	skipHostKeyCheck := false

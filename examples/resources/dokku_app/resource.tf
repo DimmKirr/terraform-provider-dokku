@@ -16,6 +16,12 @@ resource "dokku_app" "demo2" {
     status = "disabled"
   }
 
+  # https://dokku.com/docs/deployment/builders/builder-management/
+  builder = {
+    selected  = "dockerfile"
+    build_dir = "api"  # For monorepo deployments
+  }
+
   # https://dokku.com/docs/advanced-usage/persistent-storage/
   storage = {
     uploads = {

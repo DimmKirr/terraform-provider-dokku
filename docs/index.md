@@ -16,7 +16,7 @@ Interact with dokku
 terraform {
   required_providers {
     dokku = {
-      source = "registry.terraform.io/aliksend/dokku"
+      source = "registry.terraform.io/DimmKirr/dokku"
     }
   }
 }
@@ -52,6 +52,10 @@ provider "dokku" {
 ### Optional
 
 - `log_ssh_commands` (Boolean) Print SSH commands with ERROR level
+- `skip_unreachable_on_destroy` (Boolean) If true, skip SSH connection failures during destroy operations and remove resources from state anyway.
+  Useful when infrastructure has already been destroyed outside of Terraform (e.g., VM deleted, network unreachable).
+  Only affects destroy operations - create/update/read will still fail on connection errors.
+  Default: false
 - `ssh_cert` (String) Certificate (private key) to use. Default: ~/.ssh/id_rsa
   
   Supported formats:

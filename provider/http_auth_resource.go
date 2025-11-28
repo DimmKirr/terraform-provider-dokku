@@ -6,7 +6,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/aliksend/terraform-provider-dokku/internal/config"
+	"github.com/DimmKirr/terraform-provider-dokku/internal/config"
 	"github.com/hashicorp/terraform-plugin-framework-validators/mapvalidator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/path"

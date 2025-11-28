@@ -22,28 +22,57 @@ env:
   SKIP_DESTROY: "{{.SKIP_DESTROY}}"
 
 tasks:
-  build:
-    desc: Build the provider binary
+  build:darwin-arm64:
+    desc: Build the provider binary for macOS ARM64
     vars:
       BINARY: terraform-provider-dokku_v{{.VERSION}}
-      BIN_PLATFORM_DIR: bin/{{.GOOS}}_{{.GOARCH}}
+      BIN_PLATFORM_DIR: bin/darwin_arm64
     cmds:
       - mkdir -p {{.BIN_PLATFORM_DIR}}
-      - CGO_ENABLED=0 go build -o {{.BIN_PLATFORM_DIR}}/{{.BINARY}} .
+      - CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -o {{.BIN_PLATFORM_DIR}}/{{.BINARY}} .
 
-  install:
-    desc: Install the provider locally
-    deps: [build]
+  build:linux-arm64:
+    desc: Build the provider binary for Linux ARM64
     vars:
       BINARY: terraform-provider-dokku_v{{.VERSION}}
-      BIN_PLATFORM_DIR: bin/{{.GOOS}}_{{.GOARCH}}
+      BIN_PLATFORM_DIR: bin/linux_arm64
+    cmds:
+      - mkdir -p {{.BIN_PLATFORM_DIR}}
+      - CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o {{.BIN_PLATFORM_DIR}}/{{.BINARY}} .
+
+  build:
+    desc: Build the provider binary for both macOS ARM64 and Linux ARM64
+    deps:
+      - build:darwin-arm64
+      - build:linux-arm64
+
+  install:darwin-arm64:
+    desc: Install the provider locally for macOS ARM64
+    deps: [build:darwin-arm64]
+    vars:
+      BINARY: terraform-provider-dokku_v{{.VERSION}}
+      BIN_PLATFORM_DIR: bin/darwin_arm64
       PLUGIN_DIR: ~/.terraform.d/plugins/registry.terraform.io/DimmKirr/dokku/{{.VERSION}}
     cmds:
-      - mkdir -p {{.PLUGIN_DIR}}/{{.GOOS}}_{{.GOARCH}}
-      - cp {{.BIN_PLATFORM_DIR}}/{{.BINARY}} {{.PLUGIN_DIR}}/{{.GOOS}}_{{.GOARCH}}/{{.BINARY}}
-      - |
-        if [ "{{.GOOS}}" = "darwin" ]; then
-          echo "Signing binary on macOS..."
-          codesign -s - -f {{.PLUGIN_DIR}}/{{.GOOS}}_{{.GOARCH}}/{{.BINARY}} 2>/dev/null || true
-          echo "Binary signed successfully"
-        fi
+      - mkdir -p {{.PLUGIN_DIR}}/darwin_arm64
+      - cp {{.BIN_PLATFORM_DIR}}/{{.BINARY}} {{.PLUGIN_DIR}}/darwin_arm64/{{.BINARY}}
+      - echo "Signing binary on macOS..."
+      - codesign -s - -f {{.PLUGIN_DIR}}/darwin_arm64/{{.BINARY}} 2>/dev/null || true
+      - echo "Binary signed successfully"
+
+  install:linux-arm64:
+    desc: Install the provider locally for Linux ARM64
+    deps: [build:linux-arm64]
+    vars:
+      BINARY: terraform-provider-dokku_v{{.VERSION}}
+      BIN_PLATFORM_DIR: bin/linux_arm64
+      PLUGIN_DIR: ~/.terraform.d/plugins/registry.terraform.io/DimmKirr/dokku/{{.VERSION}}
+    cmds:
+      - mkdir -p {{.PLUGIN_DIR}}/linux_arm64
+      - cp {{.BIN_PLATFORM_DIR}}/{{.BINARY}} {{.PLUGIN_DIR}}/linux_arm64/{{.BINARY}}
+
+  install:
+    desc: Install the provider locally for both macOS ARM64 and Linux ARM64
+    deps:
+      - install:darwin-arm64
+      - install:linux-arm64

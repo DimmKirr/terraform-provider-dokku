@@ -1,4 +1,4 @@
-module github.com/aliksend/terraform-provider-dokku
+module github.com/DimmKirr/terraform-provider-dokku
 
 go 1.23.0
 

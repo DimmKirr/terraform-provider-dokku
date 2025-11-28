@@ -7,8 +7,8 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/aliksend/terraform-provider-dokku/internal/config"
-	dokkuclient "github.com/aliksend/terraform-provider-dokku/provider/dokku_client"
+	"github.com/DimmKirr/terraform-provider-dokku/internal/config"
+	dokkuclient "github.com/DimmKirr/terraform-provider-dokku/provider/dokku_client"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/mapvalidator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/setvalidator"
@@ -60,6 +60,7 @@ type appResourceModel struct {
 	Config        types.Map            `tfsdk:"config"`
 	Storage       types.Map            `tfsdk:"storage"`
 	Checks        *checkModel          `tfsdk:"checks"`
+	Builder       *builderModel        `tfsdk:"builder"`
 	Ports         map[string]portModel `tfsdk:"ports"`
 	ProxyPorts    map[string]portModel `tfsdk:"proxy_ports"`
 	Domains       types.Set            `tfsdk:"domains"`
@@ -75,6 +76,11 @@ type storageModel struct {
 
 type checkModel struct {
 	Status types.String `tfsdk:"status"`
+}
+
+type builderModel struct {
+	Selected types.String `tfsdk:"selected"`
+	BuildDir types.String `tfsdk:"build_dir"`
 }
 
 type portModel struct {
@@ -196,6 +202,36 @@ func (r *appResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *
 						Description: "Checks status. Default: enabled",
 						Validators: []validator.String{
 							stringvalidator.OneOf("enabled", "disabled", "skipped"),
+						},
+					},
+				},
+			},
+			"builder": schema.SingleNestedAttribute{
+				Optional: true,
+				Description: strings.Join([]string{
+					"Builder configuration for app",
+					"https://dokku.com/docs/deployment/builders/builder-management/",
+				}, "\n  "),
+				Attributes: map[string]schema.Attribute{
+					"selected": schema.StringAttribute{
+						Optional: true,
+						Description: strings.Join([]string{
+							"Builder to use for the app. If not specified, Dokku will auto-detect.",
+							"Allowed values: dockerfile, herokuish, pack, lambda, null",
+						}, "\n  "),
+						Validators: []validator.String{
+							stringvalidator.OneOf("dockerfile", "herokuish", "pack", "lambda", "null"),
+						},
+					},
+					"build_dir": schema.StringAttribute{
+						Optional: true,
+						Description: strings.Join([]string{
+							"Build directory for monorepo deployments.",
+							"Path is relative to repository root.",
+							"Directory must exist in repository or build will fail.",
+						}, "\n  "),
+						Validators: []validator.String{
+							stringvalidator.LengthAtLeast(1),
 						},
 					},
 				},
@@ -541,6 +577,28 @@ func (r *appResource) Read(ctx context.Context, req resource.ReadRequest, resp *
 		}
 	}
 
+	// Read builder settings
+	builderInfo, err := client.BuilderReport(ctx, state.AppName.ValueString())
+	if err != nil {
+		resp.Diagnostics.AddAttributeError(path.Root("builder"), "Unable to get builder info", "Unable to get builder info. "+err.Error())
+	} else {
+		// Only populate builder if values are actually set
+		selected, hasSelected := builderInfo["Builder selected"]
+		buildDir, hasBuildDir := builderInfo["Builder build dir"]
+
+		if (hasSelected && selected != "") || (hasBuildDir && buildDir != "") {
+			state.Builder = &builderModel{}
+			if hasSelected && selected != "" {
+				state.Builder.Selected = basetypes.NewStringValue(selected)
+			}
+			if hasBuildDir && buildDir != "" {
+				state.Builder.BuildDir = basetypes.NewStringValue(buildDir)
+			}
+		} else {
+			state.Builder = nil
+		}
+	}
+
 	domains, err := client.DomainsExport(ctx, state.AppName.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddAttributeError(path.Root("domains"), "Unable to get domains", "Unable to get domains. "+err.Error())
@@ -736,6 +794,24 @@ func (r *appResource) Create(ctx context.Context, req resource.CreateRequest, re
 			err := client.ChecksSet(ctx, plan.AppName.ValueString(), plan.Checks.Status.ValueString())
 			if err != nil {
 				resp.Diagnostics.AddAttributeError(path.Root("checks"), "Unable to set checks", "Unable to set checks. "+err.Error())
+			}
+		}
+	}
+
+	// Set builder configuration
+	if plan.Builder != nil {
+		if !plan.Builder.Selected.IsNull() {
+			err := client.BuilderSet(ctx, plan.AppName.ValueString(), "selected", plan.Builder.Selected.ValueString())
+			if err != nil {
+				resp.Diagnostics.AddAttributeError(path.Root("builder").AtName("selected"), "Unable to set builder selected", "Unable to set builder selected. "+err.Error())
+				return
+			}
+		}
+		if !plan.Builder.BuildDir.IsNull() {
+			err := client.BuilderSet(ctx, plan.AppName.ValueString(), "build-dir", plan.Builder.BuildDir.ValueString())
+			if err != nil {
+				resp.Diagnostics.AddAttributeError(path.Root("builder").AtName("build_dir"), "Unable to set builder build-dir", "Unable to set builder build-dir. "+err.Error())
+				return
 			}
 		}
 	}
@@ -1079,6 +1155,41 @@ func (r *appResource) Update(ctx context.Context, req resource.UpdateRequest, re
 		err := client.ChecksSet(ctx, appName, planCheckStatus)
 		if err != nil {
 			resp.Diagnostics.AddAttributeError(path.Root("checks"), "Unable to set checks", "Unable to set checks. "+err.Error())
+		}
+	}
+	// --
+
+	// -- builder
+	var planBuilderSelected, stateBuilderSelected, planBuilderBuildDir, stateBuilderBuildDir string
+
+	if plan.Builder != nil && !plan.Builder.Selected.IsNull() {
+		planBuilderSelected = plan.Builder.Selected.ValueString()
+	}
+	if state.Builder != nil && !state.Builder.Selected.IsNull() {
+		stateBuilderSelected = state.Builder.Selected.ValueString()
+	}
+	if plan.Builder != nil && !plan.Builder.BuildDir.IsNull() {
+		planBuilderBuildDir = plan.Builder.BuildDir.ValueString()
+	}
+	if state.Builder != nil && !state.Builder.BuildDir.IsNull() {
+		stateBuilderBuildDir = state.Builder.BuildDir.ValueString()
+	}
+
+	// Update selected
+	if planBuilderSelected != stateBuilderSelected {
+		err := client.BuilderSet(ctx, appName, "selected", planBuilderSelected)
+		if err != nil {
+			resp.Diagnostics.AddAttributeError(path.Root("builder").AtName("selected"), "Unable to set builder selected", "Unable to set builder selected. "+err.Error())
+			return
+		}
+	}
+
+	// Update build-dir
+	if planBuilderBuildDir != stateBuilderBuildDir {
+		err := client.BuilderSet(ctx, appName, "build-dir", planBuilderBuildDir)
+		if err != nil {
+			resp.Diagnostics.AddAttributeError(path.Root("builder").AtName("build_dir"), "Unable to set builder build-dir", "Unable to set builder build-dir. "+err.Error())
+			return
 		}
 	}
 	// --

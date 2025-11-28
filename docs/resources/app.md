@@ -25,11 +25,18 @@ resource "dokku_app" "demo2" {
   # https://dokku.com/docs/configuration/environment-variables/
   config = {
     foo = "bar"
+    PORT = "5000"
   }
 
   # https://dokku.com/docs/deployment/zero-downtime-deploys/
   checks = {
     status = "disabled"
+  }
+
+  # https://dokku.com/docs/deployment/builders/builder-management/
+  builder = {
+    selected  = "dockerfile"
+    build_dir = "api"  # For monorepo deployments
   }
 
   # https://dokku.com/docs/advanced-usage/persistent-storage/
@@ -48,12 +55,12 @@ resource "dokku_app" "demo2" {
   }
 
   # DEPRECATED use ports instead
-  proxy_ports = {
-    80 = {
-      scheme         = "http"
-      container_port = 5000
-    }
-  }
+  # proxy_ports = {
+  #   80 = {
+  #     scheme         = "http"
+  #     container_port = 5000
+  #   }
+  # }
 
   # https://dokku.com/docs/networking/port-management/
   ports = {
@@ -82,10 +89,11 @@ resource "dokku_app" "demo2" {
   # https://dokku.com/docs/deployment/methods/image/
   # https://dokku.com/docs/deployment/methods/archive/
   deploy = {
-    type         = "docker_image"
-    login        = var.docker_image_registry_login
-    password     = var.docker_image_registry_password
+    type = "docker_image"
     docker_image = var.docker_image
+    # enable if auth required
+    # login        = var.docker_image_registry_login
+    # password     = var.docker_image_registry_password
   }
 }
 ```
@@ -99,6 +107,8 @@ resource "dokku_app" "demo2" {
 
 ### Optional
 
+- `builder` (Attributes) Builder configuration for app
+  https://dokku.com/docs/deployment/builders/builder-management/ (see [below for nested schema](#nestedatt--builder))
 - `checks` (Attributes) Checks setup for app (see [below for nested schema](#nestedatt--checks))
 - `config` (Map of String) Config (env vars) for app
 - `deploy` (Attributes) Deploy setup for app (see [below for nested schema](#nestedatt--deploy))
@@ -110,6 +120,18 @@ resource "dokku_app" "demo2" {
 
 Proxy ports setup for app. Keys are host ports. (see [below for nested schema](#nestedatt--proxy_ports))
 - `storage` (Attributes Map) Persistent storage setup for app. Keys are storage names or absolute paths to host directories (see [below for nested schema](#nestedatt--storage))
+
+<a id="nestedatt--builder"></a>
+### Nested Schema for `builder`
+
+Optional:
+
+- `build_dir` (String) Build directory for monorepo deployments.
+  Path is relative to repository root.
+  Directory must exist in repository or build will fail.
+- `selected` (String) Builder to use for the app. If not specified, Dokku will auto-detect.
+  Allowed values: dockerfile, herokuish, pack, lambda, null
+
 
 <a id="nestedatt--checks"></a>
 ### Nested Schema for `checks`

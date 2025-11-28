@@ -1,7 +1,7 @@
 terraform {
   required_providers {
     dokku = {
-      source = "registry.terraform.io/aliksend/dokku"
+      source = "registry.terraform.io/DimmKirr/dokku"
     }
   }
 }

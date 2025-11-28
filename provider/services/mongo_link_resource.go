@@ -6,8 +6,8 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/aliksend/terraform-provider-dokku/internal/config"
-	dokkuclient "github.com/aliksend/terraform-provider-dokku/provider/dokku_client"
+	"github.com/DimmKirr/terraform-provider-dokku/internal/config"
+	dokkuclient "github.com/DimmKirr/terraform-provider-dokku/provider/dokku_client"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/path"
